@@ -8,8 +8,8 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const SESSION_VERSION = "v1";
 
 function getAuthConfig() {
-  const password = process.env.FLASHBACK_ORGANIZER_PASSWORD;
-  const secret = process.env.FLASHBACK_SESSION_SECRET;
+  const password = process.env.FLASHBACK_ORGANIZER_PASSWORD?.trim();
+  const secret = process.env.FLASHBACK_SESSION_SECRET?.trim();
 
   if (!password || !secret) {
     throw new Error("ORGANIZER_AUTH_NOT_CONFIGURED");
