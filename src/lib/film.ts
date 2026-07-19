@@ -1,9 +1,14 @@
-export type FilmPreset = "gold" | "noir" | "sunset";
+export type FilmPreset = "fb35" | "dispo98" | "ccd04";
+
+export type FilmRenderOptions = {
+  dateStamp?: boolean;
+  colorFlash?: boolean;
+};
 
 const presetValues: Record<FilmPreset, [number, number, number, number]> = {
-  gold: [1.08, 0.88, 0.16, 0],
-  sunset: [1.14, 1.05, 0.2, 1],
-  noir: [1.26, 0.02, 0.24, 2],
+  fb35: [1.08, 0.88, 0.14, 0],
+  dispo98: [1.15, 1.04, 0.2, 1],
+  ccd04: [1.12, 0.92, 0.09, 2],
 };
 
 const vertexShader = `
@@ -46,7 +51,8 @@ void main() {
     color *= vec3(1.12, 0.96, 0.82);
     color += vec3(0.04, 0.005, -0.025);
   } else {
-    color = vec3(luma * 1.03);
+    color *= vec3(0.91, 1.02, 1.1);
+    color += vec3(-0.012, 0.006, 0.025);
   }
 
   float grain = random(uv * u_resolution + u_seed) - 0.5;
@@ -97,7 +103,62 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
   });
 }
 
-async function canvasFallback(image: HTMLImageElement, width: number, height: number) {
+async function finishFrame(canvas: HTMLCanvasElement, options: FilmRenderOptions) {
+  if (!options.dateStamp && !options.colorFlash) return canvasToBlob(canvas);
+
+  const output = document.createElement("canvas");
+  output.width = canvas.width;
+  output.height = canvas.height;
+  const context = output.getContext("2d");
+  if (!context) return canvasToBlob(canvas);
+  context.drawImage(canvas, 0, 0);
+
+  if (options.colorFlash) {
+    context.save();
+    context.globalCompositeOperation = "screen";
+    const glow = context.createRadialGradient(
+      output.width * 0.48,
+      output.height * 0.46,
+      output.width * 0.04,
+      output.width * 0.48,
+      output.height * 0.46,
+      output.width * 0.72,
+    );
+    glow.addColorStop(0, "rgba(255, 236, 205, .34)");
+    glow.addColorStop(0.45, "rgba(255, 142, 94, .12)");
+    glow.addColorStop(1, "rgba(255, 95, 50, 0)");
+    context.fillStyle = glow;
+    context.fillRect(0, 0, output.width, output.height);
+    context.restore();
+  }
+
+  if (options.dateStamp) {
+    const date = new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "2-digit",
+    }).format(new Date()).replaceAll("/", " ");
+    const fontSize = Math.max(20, Math.round(output.width * 0.027));
+    context.save();
+    context.font = `600 ${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    context.textAlign = "right";
+    context.textBaseline = "bottom";
+    context.shadowColor = "rgba(92, 30, 0, .7)";
+    context.shadowBlur = Math.max(2, Math.round(fontSize * 0.12));
+    context.fillStyle = "#ff9b55";
+    context.fillText(date, output.width * 0.94, output.height * 0.94);
+    context.restore();
+  }
+
+  return canvasToBlob(output);
+}
+
+async function canvasFallback(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  options: FilmRenderOptions,
+) {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -105,10 +166,14 @@ async function canvasFallback(image: HTMLImageElement, width: number, height: nu
   if (!context) throw new Error("Обработка изображений недоступна.");
   context.filter = "contrast(1.08) saturate(.88) sepia(.12)";
   context.drawImage(image, 0, 0, width, height);
-  return canvasToBlob(canvas);
+  return finishFrame(canvas, options);
 }
 
-export async function applyFilmEffect(file: File, preset: FilmPreset) {
+export async function applyFilmEffect(
+  file: File,
+  preset: FilmPreset,
+  options: FilmRenderOptions = {},
+) {
   const image = await loadImage(file);
   const maxSide = 2400;
   const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
@@ -118,7 +183,7 @@ export async function applyFilmEffect(file: File, preset: FilmPreset) {
   canvas.width = width;
   canvas.height = height;
   const gl = canvas.getContext("webgl", { preserveDrawingBuffer: true });
-  if (!gl) return canvasFallback(image, width, height);
+  if (!gl) return canvasFallback(image, width, height, options);
 
   const program = gl.createProgram();
   if (!program) throw new Error("WebGL недоступен.");
@@ -158,5 +223,5 @@ export async function applyFilmEffect(file: File, preset: FilmPreset) {
   gl.viewport(0, 0, width, height);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-  return canvasToBlob(canvas);
+  return finishFrame(canvas, options);
 }

@@ -1,30 +1,45 @@
 "use client";
 
 import {
-  Aperture,
   ArrowLeft,
+  CalendarDays,
   Camera,
   Check,
+  Grid3X3,
   ImagePlus,
   Images,
   LoaderCircle,
   MapPin,
   RefreshCw,
   Send,
-  Sparkles,
+  SwitchCamera,
+  Timer,
+  Zap,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { BrandMark } from "@/components/brand-mark";
-import { applyFilmEffect, type FilmPreset } from "@/lib/film";
+import {
+  applyFilmEffect,
+  type FilmPreset,
+  type FilmRenderOptions,
+} from "@/lib/film";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { EventDetails, UploadTicket } from "@/lib/types";
 
-const presets: { id: FilmPreset; label: string; swatch: string }[] = [
-  { id: "gold", label: "Gold 200", swatch: "#cf9d5a" },
-  { id: "sunset", label: "Sunset", swatch: "#d86842" },
-  { id: "noir", label: "Noir", swatch: "#34322f" },
+type CameraStatus = "starting" | "ready" | "permission" | "unavailable";
+type FacingMode = "environment" | "user";
+
+const cameras: {
+  id: FilmPreset;
+  label: string;
+  code: string;
+  description: string;
+}[] = [
+  { id: "fb35", label: "FB 35", code: "35", description: "мягкая плёнка" },
+  { id: "dispo98", label: "DISPO 98", code: "D", description: "тёплая вспышка" },
+  { id: "ccd04", label: "CCD 04", code: "04", description: "холодный digital" },
 ];
 
 function formatEventDate(value: string) {
@@ -35,18 +50,125 @@ function formatEventDate(value: string) {
   }).format(new Date(`${value}T12:00:00`));
 }
 
+function delay(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function captureVideoFrame(video: HTMLVideoElement, mirrored: boolean) {
+  return new Promise<File>((resolve, reject) => {
+    if (!video.videoWidth || !video.videoHeight) {
+      reject(new Error("Камера ещё не готова к снимку."));
+      return;
+    }
+
+    const maxSide = 2400;
+    const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
+    const width = Math.max(1, Math.round(video.videoWidth * scale));
+    const height = Math.max(1, Math.round(video.videoHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      reject(new Error("Не удалось подготовить кадр."));
+      return;
+    }
+
+    if (mirrored) {
+      context.translate(width, 0);
+      context.scale(-1, 1);
+    }
+    context.drawImage(video, 0, 0, width, height);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Не удалось снять кадр."));
+          return;
+        }
+        resolve(new File([blob], `flashback-${Date.now()}.jpg`, { type: "image/jpeg" }));
+      },
+      "image/jpeg",
+      0.94,
+    );
+  });
+}
+
 export function EventCamera({ eventId, initialEvent }: { eventId: string; initialEvent: EventDetails | null }) {
   const [event, setEvent] = useState<EventDetails | null>(initialEvent);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
-  const [preset, setPreset] = useState<FilmPreset>("gold");
+  const [preset, setPreset] = useState<FilmPreset>("fb35");
   const [processing, setProcessing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState("");
-  const cameraInput = useRef<HTMLInputElement>(null);
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>("starting");
+  const [cameraError, setCameraError] = useState("");
+  const [facingMode, setFacingMode] = useState<FacingMode>("environment");
+  const [gridEnabled, setGridEnabled] = useState(true);
+  const [timerEnabled, setTimerEnabled] = useState(false);
+  const [dateStamp, setDateStamp] = useState(true);
+  const [colorFlash, setColorFlash] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [shutterFlash, setShutterFlash] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const fallbackCameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
+  const gallerySection = useRef<HTMLElement>(null);
+
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraStatus("unavailable");
+      setCameraError("В этом браузере доступна только системная камера.");
+      return;
+    }
+
+    stopCamera();
+    setCameraStatus("starting");
+    setCameraError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1920 },
+          height: { ideal: 1440 },
+        },
+      });
+      streamRef.current = stream;
+      const video = videoRef.current;
+      if (video) {
+        video.srcObject = stream;
+        await video.play();
+      }
+      setCameraStatus("ready");
+    } catch (reason) {
+      const cameraReason = reason as DOMException;
+      const permissionDenied = cameraReason.name === "NotAllowedError" || cameraReason.name === "SecurityError";
+      setCameraStatus(permissionDenied ? "permission" : "unavailable");
+      setCameraError(
+        permissionDenied
+          ? "Разрешите доступ к камере, чтобы открыть живой видоискатель."
+          : "Камера занята или недоступна. Можно открыть системную камеру.",
+      );
+    }
+  }, [facingMode, stopCamera]);
+
+  useEffect(() => {
+    if (sourceFile) return;
+    const frame = window.requestAnimationFrame(() => void startCamera());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      stopCamera();
+    };
+  }, [sourceFile, startCamera, stopCamera]);
 
   const loadEvent = useCallback(async () => {
     try {
@@ -65,11 +187,15 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     };
   }, [previewUrl]);
 
-  const processPhoto = useCallback(async (file: File, nextPreset: FilmPreset) => {
+  const processPhoto = useCallback(async (
+    file: File,
+    nextPreset: FilmPreset,
+    options: FilmRenderOptions = { dateStamp, colorFlash },
+  ) => {
     setProcessing(true);
     setError("");
     try {
-      const blob = await applyFilmEffect(file, nextPreset);
+      const blob = await applyFilmEffect(file, nextPreset, options);
       setProcessedBlob(blob);
       setPreviewUrl(URL.createObjectURL(blob));
     } catch (reason) {
@@ -77,7 +203,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     } finally {
       setProcessing(false);
     }
-  }, []);
+  }, [colorFlash, dateStamp]);
 
   async function pickPhoto(change: ChangeEvent<HTMLInputElement>) {
     const file = change.target.files?.[0];
@@ -95,6 +221,50 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   async function choosePreset(nextPreset: FilmPreset) {
     setPreset(nextPreset);
     if (sourceFile) await processPhoto(sourceFile, nextPreset);
+  }
+
+  async function toggleDateStamp() {
+    const nextValue = !dateStamp;
+    setDateStamp(nextValue);
+    if (sourceFile) {
+      await processPhoto(sourceFile, preset, { dateStamp: nextValue, colorFlash });
+    }
+  }
+
+  async function toggleColorFlash() {
+    const nextValue = !colorFlash;
+    setColorFlash(nextValue);
+    if (sourceFile) {
+      await processPhoto(sourceFile, preset, { dateStamp, colorFlash: nextValue });
+    }
+  }
+
+  async function takePhoto() {
+    if (cameraStatus !== "ready" || !videoRef.current) {
+      fallbackCameraInput.current?.click();
+      return;
+    }
+
+    setError("");
+    try {
+      if (timerEnabled) {
+        for (let remaining = 3; remaining > 0; remaining -= 1) {
+          setCountdown(remaining);
+          await delay(1000);
+        }
+        setCountdown(0);
+      }
+
+      setShutterFlash(true);
+      window.setTimeout(() => setShutterFlash(false), 140);
+      const file = await captureVideoFrame(videoRef.current, facingMode === "user");
+      setSourceFile(file);
+      setSent(false);
+      await processPhoto(file, preset);
+    } catch (reason) {
+      setCountdown(0);
+      setError((reason as Error).message);
+    }
   }
 
   async function uploadPhoto() {
@@ -145,6 +315,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     setProcessedBlob(null);
     setPreviewUrl("");
     setSent(false);
+    setError("");
   }
 
   if (!event) {
@@ -158,64 +329,138 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     );
   }
 
+  const activeCamera = cameras.find((item) => item.id === preset) ?? cameras[0];
+
   return (
-    <main className="guest-shell">
-      <header className="guest-header">
+    <main className="guest-shell camera-app-shell">
+      <header className="camera-app-header">
         <BrandMark compact />
-        <span className="live-pill"><i /> Камера открыта</span>
+        <button className="camera-album-link" onClick={() => gallerySection.current?.scrollIntoView({ behavior: "smooth" })}>
+          <Images size={16} /> Альбом <strong>{event.photoCount}</strong>
+        </button>
       </header>
 
-      <section className="event-intro">
-        <span className="eyebrow"><Sparkles size={14} /> Общий альбом</span>
-        <h1>{event.title}</h1>
-        <p>{formatEventDate(event.date)}{event.location && <><span>·</span><MapPin size={14} /> {event.location}</>}</p>
+      <section className="camera-event-strip">
+        <div>
+          <span>Общая камера</span>
+          <h1>{event.title}</h1>
+        </div>
+        <p><CalendarDays size={13} /> {formatEventDate(event.date)}{event.location && <><i /> <MapPin size={13} /> {event.location}</>}</p>
       </section>
 
       {!sourceFile ? (
-        <section className="capture-card">
-          <div className="viewfinder">
-            <span className="corner corner-tl" /><span className="corner corner-tr" />
-            <span className="corner corner-bl" /><span className="corner corner-br" />
-            <Aperture size={54} strokeWidth={1.35} />
-            <h2>Поймайте момент</h2>
-            <p>Кадр получит мягкий плёночный цвет, зерно и виньетку.</p>
+        <section className="dazz-camera" aria-label="Камера события">
+          <div className="camera-toolbar" aria-label="Настройки камеры">
+            <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} aria-pressed={colorFlash}>
+              <Zap size={17} /><span>вспышка</span>
+            </button>
+            <button className={timerEnabled ? "active" : ""} onClick={() => setTimerEnabled((value) => !value)} aria-pressed={timerEnabled}>
+              <Timer size={17} /><span>{timerEnabled ? "3 сек" : "таймер"}</span>
+            </button>
+            <button className={gridEnabled ? "active" : ""} onClick={() => setGridEnabled((value) => !value)} aria-pressed={gridEnabled}>
+              <Grid3X3 size={17} /><span>сетка</span>
+            </button>
+            <button className={dateStamp ? "active" : ""} onClick={() => void toggleDateStamp()} aria-pressed={dateStamp}>
+              <CalendarDays size={17} /><span>дата</span>
+            </button>
           </div>
-          <input ref={cameraInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={pickPhoto} />
-          <input ref={galleryInput} className="visually-hidden" type="file" accept="image/*" onChange={pickPhoto} />
-          <button className="shutter-button" onClick={() => cameraInput.current?.click()}>
-            <span><Camera size={28} /></span> Снять фото
-          </button>
-          <button className="gallery-button" onClick={() => galleryInput.current?.click()}><ImagePlus size={18} /> Выбрать из галереи</button>
-          <p className="privacy-note">Фото отправится только после вашего подтверждения.</p>
-        </section>
-      ) : (
-        <section className="editor-card">
-          <div className="photo-preview">
-            {previewUrl && <Image src={previewUrl} alt="Предпросмотр фотографии" fill unoptimized sizes="(max-width: 680px) 100vw, 640px" />}
-            {processing && <div className="processing-overlay"><LoaderCircle className="spin" /><span>Проявляем плёнку…</span></div>}
-            <div className="film-stamp">FLASHBACK · {new Date().getFullYear()}</div>
+
+          <div className={`live-viewfinder live-preset-${preset} ${colorFlash ? "color-flash-on" : ""}`}>
+            <video
+              ref={videoRef}
+              className={facingMode === "user" ? "mirrored" : ""}
+              autoPlay
+              muted
+              playsInline
+            />
+            <div className="live-film-grain" />
+            <div className="live-vignette" />
+            {gridEnabled && <div className="viewfinder-grid"><i /><i /><i /><i /></div>}
+            <div className="viewfinder-readout">
+              <span>FLASHBACK / {activeCamera.label}</span>
+              <span>1×</span>
+            </div>
+            {dateStamp && <span className="live-date">{formatEventDate(event.date)}</span>}
+            {shutterFlash && <div className="shutter-flash" />}
+            {countdown > 0 && <div className="camera-countdown">{countdown}</div>}
+
+            {cameraStatus !== "ready" && (
+              <div className="camera-status-panel">
+                {cameraStatus === "starting" ? (
+                  <><LoaderCircle className="spin" /><strong>Запускаем камеру</strong><span>При первом входе браузер попросит разрешение.</span></>
+                ) : (
+                  <>
+                    <Camera size={34} />
+                    <strong>{cameraStatus === "permission" ? "Нужен доступ к камере" : "Откройте системную камеру"}</strong>
+                    <span>{cameraError}</span>
+                    {cameraStatus === "permission" && <button onClick={() => void startCamera()}>Разрешить камеру</button>}
+                    {cameraStatus === "unavailable" && <button onClick={() => fallbackCameraInput.current?.click()}>Снять системной камерой</button>}
+                  </>
+                )}
+              </div>
+            )}
           </div>
-          <div className="editor-copy">
-            <span className="kicker">Плёночный профиль</span>
-            <h2>Выберите настроение</h2>
+
+          <div className="camera-control-row">
+            <button className="camera-side-control gallery-control" onClick={() => galleryInput.current?.click()} aria-label="Выбрать фотографию из галереи">
+              {event.photos[0] ? <Image src={event.photos[0].url} alt="Последний кадр" fill unoptimized sizes="48px" /> : <ImagePlus size={21} />}
+            </button>
+            <button className="camera-shutter" onClick={() => void takePhoto()} disabled={cameraStatus === "starting" || countdown > 0} aria-label="Снять фото">
+              <span />
+            </button>
+            <button className="camera-side-control" onClick={() => setFacingMode((value) => value === "environment" ? "user" : "environment")} aria-label="Переключить камеру">
+              <SwitchCamera size={23} />
+            </button>
           </div>
-          <div className="preset-row">
-            {presets.map((item) => (
-              <button key={item.id} className={`preset ${preset === item.id ? "preset-active" : ""}`} onClick={() => void choosePreset(item.id)} disabled={processing}>
-                <i style={{ background: item.swatch }} />
-                <span>{item.label}</span>
-                {preset === item.id && <Check size={15} />}
+
+          <div className="camera-deck-label">
+            <span>{activeCamera.label}</span>
+            <small>{activeCamera.description}</small>
+          </div>
+          <div className="camera-carousel" aria-label="Выбор плёночной камеры">
+            {cameras.map((item) => (
+              <button key={item.id} className={preset === item.id ? "active" : ""} onClick={() => void choosePreset(item.id)}>
+                <span>{item.code}</span>
+                <strong>{item.label}</strong>
+                <small>{item.description}</small>
               </button>
             ))}
           </div>
-          {error && <div className="notice notice-error">{error}</div>}
+
+          <input ref={fallbackCameraInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={pickPhoto} />
+          <input ref={galleryInput} className="visually-hidden" type="file" accept="image/*" onChange={pickPhoto} />
+          {error && <div className="camera-inline-error">{error}</div>}
+          <p className="camera-privacy">Фото отправится только после подтверждения.</p>
+        </section>
+      ) : (
+        <section className="camera-review">
+          <div className="review-topline"><span>Предпросмотр</span><strong>{activeCamera.label}</strong></div>
+          <div className="photo-preview">
+            {previewUrl && <Image src={previewUrl} alt="Предпросмотр фотографии" fill unoptimized sizes="(max-width: 680px) 100vw, 640px" />}
+            {processing && <div className="processing-overlay"><LoaderCircle className="spin" /><span>Проявляем плёнку…</span></div>}
+            <div className="film-stamp">FLASHBACK · {activeCamera.label}</div>
+          </div>
+
+          <div className="review-options">
+            <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} disabled={processing}><Zap size={16} /> Цветная вспышка</button>
+            <button className={dateStamp ? "active" : ""} onClick={() => void toggleDateStamp()} disabled={processing}><CalendarDays size={16} /> Дата</button>
+          </div>
+          <div className="camera-carousel review-carousel" aria-label="Выбор обработки">
+            {cameras.map((item) => (
+              <button key={item.id} className={preset === item.id ? "active" : ""} onClick={() => void choosePreset(item.id)} disabled={processing}>
+                <span>{item.code}</span><strong>{item.label}</strong><small>{item.description}</small>
+              </button>
+            ))}
+          </div>
+
+          {error && <div className="camera-inline-error">{error}</div>}
           {sent ? (
-            <div className="sent-panel">
-              <span><Check /></span><div><strong>Кадр в альбоме</strong><p>Спасибо! Можно снять ещё один.</p></div>
+            <div className="sent-panel camera-sent-panel">
+              <span><Check /></span><div><strong>Кадр в альбоме</strong><p>Проявлено и отправлено организатору.</p></div>
               <button className="button button-secondary" onClick={resetCapture}><Camera size={18} /> Ещё кадр</button>
             </div>
           ) : (
-            <div className="editor-actions">
+            <div className="editor-actions camera-review-actions">
               <button className="button button-secondary" onClick={resetCapture}><RefreshCw size={18} /> Переснять</button>
               <button className="button button-primary" onClick={uploadPhoto} disabled={processing || uploading || !processedBlob}>
                 {uploading ? <LoaderCircle className="spin" /> : <Send size={18} />}
@@ -226,12 +471,12 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
         </section>
       )}
 
-      {event.photos.length > 0 && (
-        <section className="guest-gallery">
-          <div className="section-heading guest-gallery-heading">
-            <div><span className="kicker">Уже проявлено</span><h2>Последние кадры</h2></div>
-            <span className="gallery-count"><Images size={17} /> {event.photoCount}</span>
-          </div>
+      <section className="guest-gallery camera-gallery" ref={gallerySection}>
+        <div className="section-heading guest-gallery-heading">
+          <div><span className="kicker">Уже проявлено</span><h2>Последние кадры</h2></div>
+          <span className="gallery-count"><Images size={17} /> {event.photoCount}</span>
+        </div>
+        {event.photos.length > 0 ? (
           <div className="photo-grid">
             {event.photos.slice(0, 9).map((photo, index) => (
               <div className="gallery-photo" key={photo.id}>
@@ -239,10 +484,10 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
               </div>
             ))}
           </div>
-        </section>
-      )}
+        ) : <p className="camera-gallery-empty">Первый кадр этого события может быть вашим.</p>}
+      </section>
 
-      <footer className="guest-footer">Снимайте живое. Остальное сделает плёнка.</footer>
+      <footer className="guest-footer camera-footer">Снимайте живое. Остальное сделает плёнка.</footer>
     </main>
   );
 }
