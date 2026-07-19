@@ -5,6 +5,9 @@ import {
   CalendarDays,
   Camera,
   Check,
+  ChevronLeft,
+  ChevronRight,
+  Download,
   Grid3X3,
   ImagePlus,
   Images,
@@ -14,6 +17,7 @@ import {
   Send,
   SwitchCamera,
   Timer,
+  X,
   Zap,
 } from "lucide-react";
 import Image from "next/image";
@@ -30,6 +34,7 @@ import type { EventDetails, UploadTicket } from "@/lib/types";
 
 type CameraStatus = "starting" | "ready" | "permission" | "unavailable";
 type FacingMode = "environment" | "user";
+type ViewMode = "camera" | "album";
 
 const cameras: {
   id: FilmPreset;
@@ -48,6 +53,14 @@ function formatEventDate(value: string) {
     month: "long",
     year: "numeric",
   }).format(new Date(`${value}T12:00:00`));
+}
+
+function photoWord(count: number) {
+  const lastTwo = count % 100;
+  const last = count % 10;
+  if (last === 1 && lastTwo !== 11) return "кадр";
+  if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return "кадра";
+  return "кадров";
 }
 
 function delay(milliseconds: number) {
@@ -112,11 +125,13 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const [colorFlash, setColorFlash] = useState(false);
   const [countdown, setCountdown] = useState(0);
   const [shutterFlash, setShutterFlash] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("camera");
+  const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fallbackCameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
-  const gallerySection = useRef<HTMLElement>(null);
+  const photoTotal = event?.photos.length ?? 0;
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -162,13 +177,38 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   }, [facingMode, stopCamera]);
 
   useEffect(() => {
-    if (sourceFile) return;
+    if (viewMode !== "camera" || sourceFile) {
+      stopCamera();
+      return;
+    }
     const frame = window.requestAnimationFrame(() => void startCamera());
     return () => {
       window.cancelAnimationFrame(frame);
       stopCamera();
     };
-  }, [sourceFile, startCamera, stopCamera]);
+  }, [sourceFile, startCamera, stopCamera, viewMode]);
+
+  useEffect(() => {
+    if (selectedPhotoIndex === null || photoTotal === 0) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleLightboxKeys(keyboardEvent: KeyboardEvent) {
+      if (keyboardEvent.key === "Escape") setSelectedPhotoIndex(null);
+      if (keyboardEvent.key === "ArrowLeft") {
+        setSelectedPhotoIndex((current) => current === null ? null : (current - 1 + photoTotal) % photoTotal);
+      }
+      if (keyboardEvent.key === "ArrowRight") {
+        setSelectedPhotoIndex((current) => current === null ? null : (current + 1) % photoTotal);
+      }
+    }
+
+    window.addEventListener("keydown", handleLightboxKeys);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", handleLightboxKeys);
+    };
+  }, [photoTotal, selectedPhotoIndex]);
 
   const loadEvent = useCallback(async () => {
     try {
@@ -330,13 +370,15 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   }
 
   const activeCamera = cameras.find((item) => item.id === preset) ?? cameras[0];
+  const selectedPhoto = selectedPhotoIndex === null ? null : event.photos[selectedPhotoIndex];
 
   return (
     <main className="guest-shell camera-app-shell">
       <header className="camera-app-header">
         <BrandMark compact />
-        <button className="camera-album-link" onClick={() => gallerySection.current?.scrollIntoView({ behavior: "smooth" })}>
-          <Images size={16} /> Альбом <strong>{event.photoCount}</strong>
+        <button className="camera-album-link" onClick={() => setViewMode((current) => current === "album" ? "camera" : "album")}>
+          {viewMode === "album" ? <Camera size={16} /> : <Images size={16} />}
+          {viewMode === "album" ? "Камера" : "Альбом"} <strong>{event.photoCount}</strong>
         </button>
       </header>
 
@@ -348,7 +390,16 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
         <p><CalendarDays size={13} /> {formatEventDate(event.date)}{event.location && <><i /> <MapPin size={13} /> {event.location}</>}</p>
       </section>
 
-      {!sourceFile ? (
+      <nav className="event-view-switcher" aria-label="Режим события">
+        <button className={viewMode === "camera" ? "active" : ""} onClick={() => setViewMode("camera")} aria-pressed={viewMode === "camera"}>
+          <Camera size={16} /> Камера
+        </button>
+        <button className={viewMode === "album" ? "active" : ""} onClick={() => setViewMode("album")} aria-pressed={viewMode === "album"}>
+          <Images size={16} /> Альбом <strong>{event.photoCount}</strong>
+        </button>
+      </nav>
+
+      {viewMode === "camera" ? (!sourceFile ? (
         <section className="dazz-camera" aria-label="Камера события">
           <div className="camera-toolbar" aria-label="Настройки камеры">
             <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} aria-pressed={colorFlash}>
@@ -469,23 +520,55 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             </div>
           )}
         </section>
+      )) : (
+        <section className="event-album" aria-label="Альбом события">
+          <header className="event-album-header">
+            <div>
+              <span>Все воспоминания</span>
+              <h2>Альбом события</h2>
+              <p>Кадры появляются здесь сразу после проявки.</p>
+            </div>
+            <button onClick={() => setViewMode("camera")}><Camera size={17} /> Снять ещё</button>
+          </header>
+
+          {event.photos.length > 0 ? (
+            <div className="event-album-grid">
+              {event.photos.map((photo, index) => (
+                <button className={`event-album-photo photo-shape-${index % 5}`} key={photo.id} onClick={() => setSelectedPhotoIndex(index)} aria-label={`Открыть фотографию ${index + 1}`}>
+                  <Image src={photo.url} alt={`Фото события ${index + 1}`} fill unoptimized sizes="(max-width: 600px) 50vw, 260px" />
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="event-album-empty">
+              <Images size={38} />
+              <strong>Плёнка пока пустая</strong>
+              <p>Станьте первым, кто добавит воспоминание в этот альбом.</p>
+              <button onClick={() => setViewMode("camera")}><Camera size={17} /> Открыть камеру</button>
+            </div>
+          )}
+
+          <footer className="event-album-count"><Images size={16} /> {event.photoCount} {photoWord(event.photoCount)}</footer>
+        </section>
       )}
 
-      <section className="guest-gallery camera-gallery" ref={gallerySection}>
-        <div className="section-heading guest-gallery-heading">
-          <div><span className="kicker">Уже проявлено</span><h2>Последние кадры</h2></div>
-          <span className="gallery-count"><Images size={17} /> {event.photoCount}</span>
-        </div>
-        {event.photos.length > 0 ? (
-          <div className="photo-grid">
-            {event.photos.slice(0, 9).map((photo, index) => (
-              <div className="gallery-photo" key={photo.id}>
-                <Image src={photo.url} alt={`Фото гостя ${index + 1}`} fill unoptimized sizes="(max-width: 600px) 33vw, 220px" />
-              </div>
-            ))}
+      {selectedPhoto && selectedPhotoIndex !== null && (
+        <div className="album-lightbox" role="dialog" aria-modal="true" aria-label={`Фотография ${selectedPhotoIndex + 1}`}>
+          <button className="album-lightbox-close" onClick={() => setSelectedPhotoIndex(null)} aria-label="Закрыть фотографию"><X size={24} /></button>
+          <div className="album-lightbox-stage">
+            <button onClick={() => setSelectedPhotoIndex((selectedPhotoIndex - 1 + event.photos.length) % event.photos.length)} aria-label="Предыдущая фотография"><ChevronLeft size={27} /></button>
+            <div className="album-lightbox-photo">
+              <Image src={selectedPhoto.url} alt={`Фото события ${selectedPhotoIndex + 1}`} fill unoptimized sizes="100vw" priority />
+            </div>
+            <button onClick={() => setSelectedPhotoIndex((selectedPhotoIndex + 1) % event.photos.length)} aria-label="Следующая фотография"><ChevronRight size={27} /></button>
           </div>
-        ) : <p className="camera-gallery-empty">Первый кадр этого события может быть вашим.</p>}
-      </section>
+          <div className="album-lightbox-meta">
+            <span>{selectedPhotoIndex + 1} / {event.photos.length}</span>
+            <a href={selectedPhoto.url} target="_blank" rel="noreferrer"><Download size={16} /> Открыть оригинал</a>
+          </div>
+        </div>
+      )}
 
       <footer className="guest-footer camera-footer">Снимайте живое. Остальное сделает плёнка.</footer>
     </main>

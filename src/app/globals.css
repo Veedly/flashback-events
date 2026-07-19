@@ -256,6 +256,45 @@ button { color: inherit; }
   text-align: right;
 }
 .camera-event-strip p i { width: 2px; height: 2px; border-radius: 50%; background: #69665f; }
+.event-view-switcher {
+  width: min(520px, calc(100% - 32px));
+  margin: 0 auto 14px;
+  padding: 4px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 14px;
+  background: #151513;
+}
+.event-view-switcher button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #77746e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.event-view-switcher button strong {
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  color: #9d9991;
+  font: 9px ui-monospace, monospace;
+}
+.event-view-switcher button.active {
+  background: #f4f0e7;
+  color: #171614;
+  box-shadow: 0 4px 18px rgba(0,0,0,.2);
+}
+.event-view-switcher button.active strong { background: #ff744f; color: white; }
 .dazz-camera,
 .camera-review {
   width: min(520px, 100%);
@@ -582,6 +621,196 @@ button { color: inherit; }
   padding: 32px 18px calc(34px + env(safe-area-inset-bottom));
   background: var(--paper);
   border-color: var(--line);
+}
+.event-album {
+  width: min(720px, 100%);
+  min-height: 62dvh;
+  margin: 0 auto;
+  padding: 38px 18px 46px;
+  background: var(--paper);
+  color: var(--ink);
+}
+.event-album-header {
+  margin-bottom: 26px;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+}
+.event-album-header > div { min-width: 0; }
+.event-album-header span {
+  color: #d95132;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.event-album-header h2 { margin: 5px 0 4px; font-size: clamp(30px, 7vw, 46px); letter-spacing: -.06em; }
+.event-album-header p { margin: 0; color: var(--muted); font-size: 12px; }
+.event-album-header button,
+.event-album-empty button {
+  min-height: 42px;
+  padding: 0 14px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  background: #171614;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 720;
+  cursor: pointer;
+}
+.event-album-grid { columns: 2; column-gap: 8px; }
+.event-album-photo {
+  position: relative;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 0;
+  break-inside: avoid;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: #d4cdc1;
+  cursor: zoom-in;
+}
+.event-album-photo.photo-shape-0,
+.event-album-photo.photo-shape-3 { aspect-ratio: 4 / 5; }
+.event-album-photo.photo-shape-1 { aspect-ratio: 1; }
+.event-album-photo.photo-shape-2 { aspect-ratio: 3 / 4; }
+.event-album-photo.photo-shape-4 { aspect-ratio: 5 / 4; }
+.event-album-photo img { object-fit: cover; transition: transform .35s ease, filter .35s ease; }
+.event-album-photo:hover img { transform: scale(1.025); filter: contrast(1.04); }
+.event-album-photo span {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: rgba(13,12,10,.68);
+  color: rgba(255,255,255,.86);
+  font: 8px ui-monospace, monospace;
+  backdrop-filter: blur(7px);
+}
+.event-album-empty {
+  min-height: 340px;
+  padding: 38px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 18px;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 10px;
+}
+.event-album-empty > svg { color: #d95132; }
+.event-album-empty strong { color: var(--ink); font-size: 19px; }
+.event-album-empty p { max-width: 300px; margin: 0 0 8px; font-size: 12px; line-height: 1.5; }
+.event-album-count {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font: 10px ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.album-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  padding: max(18px, env(safe-area-inset-top)) 12px max(18px, env(safe-area-inset-bottom));
+  background: rgba(6,6,5,.96);
+  color: white;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  animation: fade-in .18s ease-out;
+  backdrop-filter: blur(16px);
+}
+.album-lightbox-close {
+  position: absolute;
+  z-index: 2;
+  top: max(16px, env(safe-area-inset-top));
+  right: 16px;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  background: rgba(255,255,255,.08);
+  color: white;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.album-lightbox-stage {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 6px;
+}
+.album-lightbox-stage > button {
+  width: 42px;
+  height: 58px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  color: white;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+.album-lightbox-photo {
+  position: relative;
+  width: 100%;
+  height: min(74dvh, 920px);
+}
+.album-lightbox-photo img { object-fit: contain; }
+.album-lightbox-meta {
+  width: min(760px, calc(100% - 96px));
+  margin: 15px auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  color: #8f8b84;
+  font: 10px ui-monospace, monospace;
+}
+.album-lightbox-meta a {
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px;
+  color: #e5e0d7;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-decoration: none;
+}
+
+@media (min-width: 700px) {
+  .event-album { padding-left: 28px; padding-right: 28px; }
+  .event-album-grid { columns: 3; column-gap: 10px; }
+  .event-album-photo { margin-bottom: 10px; }
+}
+
+@media (max-width: 430px) {
+  .event-album-header { align-items: start; flex-direction: column; gap: 14px; }
+  .event-album-header button { width: 100%; }
+  .album-lightbox { padding-left: 4px; padding-right: 4px; }
+  .album-lightbox-stage { grid-template-columns: 34px minmax(0, 1fr) 34px; gap: 2px; }
+  .album-lightbox-stage > button { width: 34px; height: 52px; background: transparent; }
+  .album-lightbox-meta { width: calc(100% - 76px); }
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
