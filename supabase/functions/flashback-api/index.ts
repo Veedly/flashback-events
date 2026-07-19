@@ -118,12 +118,12 @@ function safeDriveName(value: string) {
 
 async function uploadBlobToDrive(
   accessToken: string,
-  rootFolderId: string,
+  folderId: string,
   fileName: string,
   image: Blob,
 ) {
   const boundary = `flashback-${crypto.randomUUID()}`;
-  const metadata = JSON.stringify({ name: fileName, parents: [rootFolderId] });
+  const metadata = JSON.stringify({ name: fileName, parents: [folderId] });
   const body = new Blob([
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`,
     `--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`,
@@ -146,6 +146,61 @@ async function uploadBlobToDrive(
     throw new Error(`Google Drive upload failed (${response.status})`);
   }
   return data as { id: string; webViewLink?: string };
+}
+
+function driveQueryLiteral(value: string) {
+  return value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+}
+
+function eventDriveFolderName(event: { public_id: string; title: string; event_date: string }) {
+  return `${event.event_date} — ${safeDriveName(event.title)} — ${event.public_id}`;
+}
+
+async function getOrCreateEventDriveFolder(
+  accessToken: string,
+  rootFolderId: string,
+  event: { public_id: string; title: string; event_date: string },
+) {
+  const name = eventDriveFolderName(event);
+  const query = [
+    `'${driveQueryLiteral(rootFolderId)}' in parents`,
+    `name = '${driveQueryLiteral(name)}'`,
+    "mimeType = 'application/vnd.google-apps.folder'",
+    "trashed = false",
+  ].join(" and ");
+  const params = new URLSearchParams({ q: query, pageSize: "1", fields: "files(id)" });
+  const findResponse = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const found = await findResponse.json();
+  if (!findResponse.ok) throw new Error(`Google Drive folder lookup failed (${findResponse.status})`);
+  if (Array.isArray(found.files) && typeof found.files[0]?.id === "string") return found.files[0].id;
+
+  const createResponse = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [rootFolderId],
+    }),
+  });
+  const created = await createResponse.json();
+  if (!createResponse.ok || typeof created.id !== "string") {
+    throw new Error(`Google Drive folder creation failed (${createResponse.status})`);
+  }
+  return created.id;
+}
+
+async function removePhotoFromStorage(
+  admin: ReturnType<typeof getAdminClient>,
+  storagePath: string,
+) {
+  const { error } = await admin.storage.from(BUCKET).remove([storagePath]);
+  if (error) throw error;
 }
 
 async function syncDrivePhoto(
@@ -185,6 +240,7 @@ async function syncDrivePhoto(
       .single();
     if (photoError) throw photoError;
     if (photo.drive_file_id) {
+      await removePhotoFromStorage(admin, photo.storage_path);
       await admin.from("drive_sync_jobs").update({
         status: "synced",
         locked_at: null,
@@ -208,13 +264,15 @@ async function syncDrivePhoto(
     const accessToken = await getGoogleAccessToken();
     if (!accessToken) return { configured: false, synced: false };
     const fileName = `${event.event_date}_${safeDriveName(event.title)}_${event.public_id}_${photo.id}.jpg`;
-    const driveFile = await uploadBlobToDrive(accessToken, rootFolderId, fileName, image);
+    const eventFolderId = await getOrCreateEventDriveFolder(accessToken, rootFolderId, event);
+    const driveFile = await uploadBlobToDrive(accessToken, eventFolderId, fileName, image);
 
     const { error: photoUpdateError } = await admin.from("photos").update({
       drive_file_id: driveFile.id,
       drive_sync_status: "synced",
     }).eq("id", photo.id);
     if (photoUpdateError) throw photoUpdateError;
+    await removePhotoFromStorage(admin, photo.storage_path);
     const { error: jobUpdateError } = await admin.from("drive_sync_jobs").update({
       status: "synced",
       locked_at: null,
@@ -282,7 +340,7 @@ async function ensureBucket(admin: ReturnType<typeof getAdminClient>) {
 async function listEvents(admin: ReturnType<typeof getAdminClient>) {
   const { data, error } = await admin
     .from("events")
-    .select("id, public_id, title, event_date, location, created_at")
+    .select("id, public_id, title, event_date, location, guest_photo_limit, created_at")
     .order("created_at", { ascending: false });
   if (error) throw error;
 
@@ -300,6 +358,7 @@ async function listEvents(admin: ReturnType<typeof getAdminClient>) {
         location: event.location,
         createdAt: event.created_at,
         photoCount: count ?? 0,
+        guestPhotoLimit: event.guest_photo_limit,
       };
     }),
   );
@@ -311,14 +370,21 @@ async function createEvent(request: Request, admin: ReturnType<typeof getAdminCl
   const title = typeof body.title === "string" ? body.title.trim() : "";
   const date = typeof body.date === "string" ? body.date : "";
   const location = typeof body.location === "string" ? body.location.trim() : "";
-  if (!title || title.length > 80 || !/^\d{4}-\d{2}-\d{2}$/.test(date) || location.length > 100) {
+  const guestPhotoLimit = body.guestPhotoLimit === null ? null : Number(body.guestPhotoLimit);
+  if (
+    !title ||
+    title.length > 80 ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    location.length > 100 ||
+    (guestPhotoLimit !== null && ![20, 50, 100].includes(guestPhotoLimit))
+  ) {
     throw new ApiError(400, "Invalid event data");
   }
 
   const { data, error } = await admin
     .from("events")
-    .insert({ title, event_date: date, location })
-    .select("public_id, title, event_date, location, created_at")
+    .insert({ title, event_date: date, location, guest_photo_limit: guestPhotoLimit })
+    .select("public_id, title, event_date, location, guest_photo_limit, created_at")
     .single();
   if (error) throw error;
   return json({
@@ -329,6 +395,7 @@ async function createEvent(request: Request, admin: ReturnType<typeof getAdminCl
       location: data.location,
       createdAt: data.created_at,
       photoCount: 0,
+      guestPhotoLimit: data.guest_photo_limit,
     },
   }, 201);
 }
@@ -337,7 +404,7 @@ async function findEvent(publicId: string, admin: ReturnType<typeof getAdminClie
   if (!/^[a-f0-9]{24}$/.test(publicId)) throw new ApiError(404, "Event not found");
   const { data, error } = await admin
     .from("events")
-    .select("id, public_id, title, event_date, location, created_at, is_open")
+    .select("id, public_id, title, event_date, location, guest_photo_limit, created_at, is_open")
     .eq("public_id", publicId)
     .maybeSingle();
   if (error) throw error;
@@ -349,14 +416,45 @@ async function getEvent(publicId: string, admin: ReturnType<typeof getAdminClien
   const event = await findEvent(publicId, admin);
   const { data: photos, error } = await admin
     .from("photos")
-    .select("id, storage_path, created_at")
+    .select("id, storage_path, drive_file_id, guest_id, created_at, guest:event_guests(display_name)")
     .eq("event_id", event.id)
     .eq("status", "ready")
     .order("created_at", { ascending: false })
     .limit(100);
   if (error) throw error;
 
-  const paths = (photos ?? []).map((photo) => photo.storage_path);
+  const [{ data: guests, error: guestsError }, { data: guestPhotos, error: guestPhotosError }, { count: totalPhotoCount }] = await Promise.all([
+    admin
+      .from("event_guests")
+      .select("id, display_name, created_at")
+      .eq("event_id", event.id)
+      .order("created_at", { ascending: true }),
+    admin
+      .from("photos")
+      .select("guest_id")
+      .eq("event_id", event.id)
+      .eq("status", "ready")
+      .not("guest_id", "is", null),
+    admin
+      .from("photos")
+      .select("id", { count: "exact", head: true })
+      .eq("event_id", event.id)
+      .eq("status", "ready"),
+  ]);
+  if (guestsError) throw guestsError;
+  if (guestPhotosError) throw guestPhotosError;
+
+  const countByGuest = new Map<string, number>();
+  for (const photo of guestPhotos ?? []) {
+    if (photo.guest_id) countByGuest.set(photo.guest_id, (countByGuest.get(photo.guest_id) ?? 0) + 1);
+  }
+  const leaderboard = (guests ?? []).map((guest) => ({
+    guestId: guest.id,
+    displayName: guest.display_name,
+    photoCount: countByGuest.get(guest.id) ?? 0,
+  })).sort((left, right) => right.photoCount - left.photoCount || left.displayName.localeCompare(right.displayName, "ru"));
+
+  const paths = (photos ?? []).filter((photo) => !photo.drive_file_id).map((photo) => photo.storage_path);
   const signedByPath = new Map<string, string>();
   if (paths.length) {
     const { data: signed, error: signedError } = await admin.storage
@@ -370,8 +468,11 @@ async function getEvent(publicId: string, admin: ReturnType<typeof getAdminClien
 
   const readyPhotos = (photos ?? []).map((photo) => ({
     id: String(photo.id),
-    url: signedByPath.get(photo.storage_path) ?? "",
+    url: photo.drive_file_id
+      ? `/api/events/${publicId}/photos/${photo.id}`
+      : signedByPath.get(photo.storage_path) ?? "",
     createdAt: photo.created_at,
+    authorName: (Array.isArray(photo.guest) ? photo.guest[0]?.display_name : photo.guest?.display_name) ?? null,
   })).filter((photo) => photo.url);
 
   return json({
@@ -381,8 +482,126 @@ async function getEvent(publicId: string, admin: ReturnType<typeof getAdminClien
       date: event.event_date,
       location: event.location,
       createdAt: event.created_at,
-      photoCount: readyPhotos.length,
+      photoCount: totalPhotoCount ?? readyPhotos.length,
+      guestPhotoLimit: event.guest_photo_limit,
       photos: readyPhotos,
+      leaderboard,
+    },
+  });
+}
+
+async function authenticateGuest(
+  eventId: number,
+  guestId: unknown,
+  guestToken: unknown,
+  admin: ReturnType<typeof getAdminClient>,
+) {
+  if (
+    typeof guestId !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(guestId) ||
+    typeof guestToken !== "string" ||
+    guestToken.length < 24
+  ) {
+    throw new ApiError(401, "Guest session required");
+  }
+  const tokenHash = await sha256(guestToken);
+  const { data, error } = await admin
+    .from("event_guests")
+    .select("id, display_name")
+    .eq("id", guestId)
+    .eq("event_id", eventId)
+    .eq("access_token_hash", tokenHash)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new ApiError(401, "Guest session required");
+  return data;
+}
+
+async function readyPhotoCount(
+  eventId: number,
+  guestId: string,
+  admin: ReturnType<typeof getAdminClient>,
+) {
+  const { count, error } = await admin
+    .from("photos")
+    .select("id", { count: "exact", head: true })
+    .eq("event_id", eventId)
+    .eq("guest_id", guestId)
+    .eq("status", "ready");
+  if (error) throw error;
+  return count ?? 0;
+}
+
+async function createGuestSession(
+  request: Request,
+  publicId: string,
+  admin: ReturnType<typeof getAdminClient>,
+) {
+  const event = await findEvent(publicId, admin);
+  const body = await request.json();
+  if (body.guestId && body.guestToken) {
+    const guest = await authenticateGuest(event.id, body.guestId, body.guestToken, admin);
+    return json({
+      guestId: guest.id,
+      guestToken: body.guestToken,
+      displayName: guest.display_name,
+      photoCount: await readyPhotoCount(event.id, guest.id, admin),
+      photoLimit: event.guest_photo_limit,
+    });
+  }
+
+  const displayName = typeof body.displayName === "string" ? body.displayName.trim().replace(/\s+/g, " ") : "";
+  if (!displayName || displayName.length > 40) throw new ApiError(400, "Invalid guest name");
+  const guestToken = randomToken();
+  const { data: guest, error } = await admin
+    .from("event_guests")
+    .insert({
+      event_id: event.id,
+      display_name: displayName,
+      access_token_hash: await sha256(guestToken),
+    })
+    .select("id, display_name")
+    .single();
+  if (error) throw error;
+  return json({
+    guestId: guest.id,
+    guestToken,
+    displayName: guest.display_name,
+    photoCount: 0,
+    photoLimit: event.guest_photo_limit,
+  }, 201);
+}
+
+async function serveDrivePhoto(
+  publicId: string,
+  photoId: string,
+  admin: ReturnType<typeof getAdminClient>,
+) {
+  const event = await findEvent(publicId, admin);
+  const id = Number(photoId);
+  if (!Number.isSafeInteger(id) || id < 1) throw new ApiError(404, "Photo not found");
+  const { data: photo, error } = await admin
+    .from("photos")
+    .select("drive_file_id")
+    .eq("id", id)
+    .eq("event_id", event.id)
+    .eq("status", "ready")
+    .maybeSingle();
+  if (error) throw error;
+  if (!photo?.drive_file_id) throw new ApiError(404, "Photo not synced yet");
+
+  const accessToken = await getGoogleAccessToken();
+  if (!accessToken) throw new ApiError(503, "Google Drive is not configured");
+  const response = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(photo.drive_file_id)}?alt=media`,
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
+  if (!response.ok || !response.body) throw new ApiError(502, "Google Drive photo download failed");
+  return new Response(response.body, {
+    headers: {
+      ...corsHeaders,
+      "Content-Type": response.headers.get("Content-Type") ?? "image/jpeg",
+      "Cache-Control": "public, max-age=3600",
     },
   });
 }
@@ -395,9 +614,21 @@ async function createUploadUrl(
   const event = await findEvent(publicId, admin);
   if (!event.is_open) throw new ApiError(403, "Event is closed");
   const body = await request.json();
+  const guest = await authenticateGuest(event.id, body.guestId, body.guestToken, admin);
   const size = Number(body.size);
   if (body.contentType !== "image/jpeg" || !Number.isSafeInteger(size) || size < 1 || size > 12 * 1024 * 1024) {
     throw new ApiError(400, "Invalid photo");
+  }
+
+  if (event.guest_photo_limit !== null) {
+    const { count, error: countError } = await admin
+      .from("photos")
+      .select("id", { count: "exact", head: true })
+      .eq("event_id", event.id)
+      .eq("guest_id", guest.id)
+      .in("status", ["uploading", "ready"]);
+    if (countError) throw countError;
+    if ((count ?? 0) >= event.guest_photo_limit) throw new ApiError(429, "Guest photo limit reached");
   }
 
   const storagePath = `${publicId}/${crypto.randomUUID()}.jpg`;
@@ -407,6 +638,7 @@ async function createUploadUrl(
     .from("photos")
     .insert({
       event_id: event.id,
+      guest_id: guest.id,
       storage_path: storagePath,
       size_bytes: size,
       completion_token_hash: completionTokenHash,
@@ -494,6 +726,12 @@ Deno.serve(async (request) => {
 
     const publicId = parts[1];
     if (request.method === "GET" && parts.length === 2) return await getEvent(publicId, admin);
+    if (request.method === "POST" && parts[2] === "guests" && parts[3] === "session") {
+      return await createGuestSession(request, publicId, admin);
+    }
+    if (request.method === "GET" && parts[2] === "photos" && parts[4] === "content") {
+      return await serveDrivePhoto(publicId, parts[3], admin);
+    }
     if (request.method === "POST" && parts[2] === "upload-url") {
       return await createUploadUrl(request, publicId, admin);
     }

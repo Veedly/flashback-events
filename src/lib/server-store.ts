@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { EventDetails, EventRecord, UploadTicket } from "@/lib/types";
+import type { EventDetails, EventRecord, GuestSession, UploadTicket } from "@/lib/types";
 
 function getEdgeConfig() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -53,6 +53,7 @@ export async function createEvent(input: {
   title: string;
   date: string;
   location: string;
+  guestPhotoLimit: 20 | 50 | 100 | null;
 }): Promise<EventRecord> {
   const data = await edgeRequest<{ event: EventRecord }>(
     "/events",
@@ -74,9 +75,28 @@ export async function getEvent(eventId: string): Promise<EventDetails | null> {
 
 export async function createPhotoUpload(
   eventId: string,
-  input: { size: number; contentType: "image/jpeg" },
+  input: {
+    size: number;
+    contentType: "image/jpeg";
+    guestId: string;
+    guestToken: string;
+  },
 ): Promise<UploadTicket> {
   return edgeRequest<UploadTicket>(`/events/${eventId}/upload-url`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function createGuestSession(
+  eventId: string,
+  input: {
+    displayName?: string;
+    guestId?: string;
+    guestToken?: string;
+  },
+): Promise<GuestSession> {
+  return edgeRequest<GuestSession>(`/events/${eventId}/guests/session`, {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -89,5 +109,16 @@ export async function completePhotoUpload(
   return edgeRequest<{ ok: true }>(`/events/${eventId}/complete`, {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export async function fetchDrivePhoto(eventId: string, photoId: string) {
+  const { url, anonKey } = getEdgeConfig();
+  return fetch(`${url}/events/${eventId}/photos/${photoId}/content`, {
+    headers: {
+      apikey: anonKey,
+      Authorization: `Bearer ${anonKey}`,
+    },
+    cache: "no-store",
   });
 }

@@ -53,6 +53,9 @@ export function OrganizerDashboard({ initialEvents }: { initialEvents: EventReco
           title: form.get("title"),
           date: form.get("date"),
           location: form.get("location"),
+          guestPhotoLimit: form.get("guestPhotoLimit") === "unlimited"
+            ? null
+            : Number(form.get("guestPhotoLimit")),
         }),
       });
       const data = (await response.json()) as {
@@ -159,6 +162,22 @@ export function OrganizerDashboard({ initialEvents }: { initialEvents: EventReco
                 <label>Дата<input name="date" required type="date" /></label>
                 <label>Место<input name="location" maxLength={100} placeholder="Лофт «Смена»" /></label>
               </div>
+              <fieldset className="limit-picker">
+                <legend>Кадров на одного гостя</legend>
+                <div>
+                  {[
+                    ["unlimited", "Без лимита"],
+                    ["20", "20"],
+                    ["50", "50"],
+                    ["100", "100"],
+                  ].map(([value, label]) => (
+                    <label key={value}>
+                      <input type="radio" name="guestPhotoLimit" value={value} defaultChecked={value === "unlimited"} />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
               <button className="button button-primary button-large" disabled={saving}>
                 {saving ? <LoaderCircle className="spin" /> : <QrCode />}
                 {saving ? "Создаём…" : "Создать и получить QR"}
@@ -175,6 +194,9 @@ export function OrganizerDashboard({ initialEvents }: { initialEvents: EventReco
             <span className="kicker">Ссылка готова</span>
             <h2 id="qr-title">{selected.title}</h2>
             <p>Покажите этот код гостям или отправьте им ссылку.</p>
+            <div className="qr-event-limit">
+              {selected.guestPhotoLimit ? `До ${selected.guestPhotoLimit} кадров на гостя` : "Без лимита кадров"}
+            </div>
             <div className="qr-frame">
               {eventUrl && <QRCodeSVG value={eventUrl} size={220} level="H" marginSize={2} bgColor="#fffdf8" fgColor="#171512" title={`QR-код события ${selected.title}`} />}
             </div>

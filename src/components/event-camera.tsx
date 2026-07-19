@@ -17,35 +17,30 @@ import {
   Send,
   SwitchCamera,
   Timer,
+  Trophy,
+  UserRound,
   X,
   Zap,
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
-import { BrandMark } from "@/components/brand-mark";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   applyFilmEffect,
-  type FilmPreset,
   type FilmRenderOptions,
 } from "@/lib/film";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
-import type { EventDetails, UploadTicket } from "@/lib/types";
+import type { EventDetails, GuestSession, UploadTicket } from "@/lib/types";
 
 type CameraStatus = "starting" | "ready" | "permission" | "unavailable";
 type FacingMode = "environment" | "user";
-type ViewMode = "camera" | "album";
+type ViewMode = "camera" | "album" | "leaderboard";
+type GuestStatus = "checking" | "required" | "ready";
 
-const cameras: {
-  id: FilmPreset;
-  label: string;
-  code: string;
-  description: string;
-}[] = [
-  { id: "fb35", label: "FB 35", code: "35", description: "мягкая плёнка" },
-  { id: "dispo98", label: "DISPO 98", code: "D", description: "тёплая вспышка" },
-  { id: "ccd04", label: "CCD 04", code: "04", description: "холодный digital" },
-];
+const GUEST_STORAGE_PREFIX = "flashback-guest:";
+
+const CAMERA_MODEL = "FLASH 98";
+const CAMERA_DESCRIPTION = "одноразовая вспышка · 35 мм";
 
 function formatEventDate(value: string) {
   return new Intl.DateTimeFormat("ru-RU", {
@@ -111,7 +106,6 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [processedBlob, setProcessedBlob] = useState<Blob | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
-  const [preset, setPreset] = useState<FilmPreset>("fb35");
   const [processing, setProcessing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sent, setSent] = useState(false);
@@ -127,11 +121,19 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const [shutterFlash, setShutterFlash] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("camera");
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
+  const [guestStatus, setGuestStatus] = useState<GuestStatus>("checking");
+  const [guest, setGuest] = useState<GuestSession | null>(null);
+  const [guestName, setGuestName] = useState("");
+  const [guestError, setGuestError] = useState("");
+  const [guestSaving, setGuestSaving] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fallbackCameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
   const photoTotal = event?.photos.length ?? 0;
+  const guestAtLimit = guest?.photoLimit !== null
+    && guest?.photoLimit !== undefined
+    && guest.photoCount >= guest.photoLimit;
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -177,7 +179,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   }, [facingMode, stopCamera]);
 
   useEffect(() => {
-    if (viewMode !== "camera" || sourceFile) {
+    if (guestStatus !== "ready" || viewMode !== "camera" || sourceFile) {
       stopCamera();
       return;
     }
@@ -186,7 +188,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
       window.cancelAnimationFrame(frame);
       stopCamera();
     };
-  }, [sourceFile, startCamera, stopCamera, viewMode]);
+  }, [guestStatus, sourceFile, startCamera, stopCamera, viewMode]);
 
   useEffect(() => {
     if (selectedPhotoIndex === null || photoTotal === 0) return;
@@ -222,6 +224,70 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   }, [eventId]);
 
   useEffect(() => {
+    if (!event?.id) return;
+    let cancelled = false;
+    const storageKey = `${GUEST_STORAGE_PREFIX}${eventId}`;
+    const saved = window.localStorage.getItem(storageKey);
+    if (!saved) {
+      void Promise.resolve().then(() => {
+        if (!cancelled) setGuestStatus("required");
+      });
+    } else {
+      void (async () => {
+        try {
+          const credentials = JSON.parse(saved) as { guestId?: string; guestToken?: string };
+          const response = await fetch(`/api/events/${eventId}/guests/session`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(credentials),
+          });
+          const session = (await response.json()) as GuestSession & { error?: string };
+          if (!response.ok) throw new Error(session.error ?? "Сессия гостя истекла.");
+          if (!cancelled) {
+            setGuest(session);
+            setGuestStatus("ready");
+          }
+        } catch {
+          window.localStorage.removeItem(storageKey);
+          if (!cancelled) setGuestStatus("required");
+        }
+      })();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [event?.id, eventId]);
+
+  async function submitGuestName(formEvent: FormEvent<HTMLFormElement>) {
+    formEvent.preventDefault();
+    const displayName = guestName.trim().replace(/\s+/g, " ");
+    if (!displayName) return;
+    setGuestSaving(true);
+    setGuestError("");
+    try {
+      const response = await fetch(`/api/events/${eventId}/guests/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName }),
+      });
+      const session = (await response.json()) as GuestSession & { error?: string };
+      if (!response.ok) throw new Error(session.error ?? "Не удалось войти в событие.");
+      window.localStorage.setItem(`${GUEST_STORAGE_PREFIX}${eventId}`, JSON.stringify({
+        guestId: session.guestId,
+        guestToken: session.guestToken,
+      }));
+      setGuest(session);
+      setGuestStatus("ready");
+      await loadEvent();
+    } catch (reason) {
+      setGuestError((reason as Error).message);
+    } finally {
+      setGuestSaving(false);
+    }
+  }
+
+  useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
@@ -229,13 +295,12 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
 
   const processPhoto = useCallback(async (
     file: File,
-    nextPreset: FilmPreset,
     options: FilmRenderOptions = { dateStamp, colorFlash },
   ) => {
     setProcessing(true);
     setError("");
     try {
-      const blob = await applyFilmEffect(file, nextPreset, options);
+      const blob = await applyFilmEffect(file, options);
       setProcessedBlob(blob);
       setPreviewUrl(URL.createObjectURL(blob));
     } catch (reason) {
@@ -249,25 +314,24 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     const file = change.target.files?.[0];
     change.target.value = "";
     if (!file) return;
+    if (guestAtLimit) {
+      setError(`Вы уже использовали все ${guest?.photoLimit} кадров.`);
+      return;
+    }
     if (!file.type.startsWith("image/")) {
       setError("Выберите фотографию.");
       return;
     }
     setSourceFile(file);
     setSent(false);
-    await processPhoto(file, preset);
-  }
-
-  async function choosePreset(nextPreset: FilmPreset) {
-    setPreset(nextPreset);
-    if (sourceFile) await processPhoto(sourceFile, nextPreset);
+    await processPhoto(file);
   }
 
   async function toggleDateStamp() {
     const nextValue = !dateStamp;
     setDateStamp(nextValue);
     if (sourceFile) {
-      await processPhoto(sourceFile, preset, { dateStamp: nextValue, colorFlash });
+      await processPhoto(sourceFile, { dateStamp: nextValue, colorFlash });
     }
   }
 
@@ -275,11 +339,15 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     const nextValue = !colorFlash;
     setColorFlash(nextValue);
     if (sourceFile) {
-      await processPhoto(sourceFile, preset, { dateStamp, colorFlash: nextValue });
+      await processPhoto(sourceFile, { dateStamp, colorFlash: nextValue });
     }
   }
 
   async function takePhoto() {
+    if (guestAtLimit) {
+      setError(`Вы уже использовали все ${guest?.photoLimit} кадров.`);
+      return;
+    }
     if (cameraStatus !== "ready" || !videoRef.current) {
       fallbackCameraInput.current?.click();
       return;
@@ -300,7 +368,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
       const file = await captureVideoFrame(videoRef.current, facingMode === "user");
       setSourceFile(file);
       setSent(false);
-      await processPhoto(file, preset);
+      await processPhoto(file);
     } catch (reason) {
       setCountdown(0);
       setError((reason as Error).message);
@@ -308,14 +376,23 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   }
 
   async function uploadPhoto() {
-    if (!processedBlob) return;
+    if (!processedBlob || !guest) return;
+    if (guestAtLimit) {
+      setError(`Вы уже использовали все ${guest.photoLimit} кадров.`);
+      return;
+    }
     setUploading(true);
     setError("");
     try {
       const ticketResponse = await fetch(`/api/events/${eventId}/photos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ size: processedBlob.size, contentType: "image/jpeg" }),
+        body: JSON.stringify({
+          size: processedBlob.size,
+          contentType: "image/jpeg",
+          guestId: guest.guestId,
+          guestToken: guest.guestToken,
+        }),
       });
       const ticket = (await ticketResponse.json()) as UploadTicket & { error?: string };
       if (!ticketResponse.ok) {
@@ -342,6 +419,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
         throw new Error(complete.error ?? "Не удалось подтвердить загрузку фото.");
       }
       setSent(true);
+      setGuest((current) => current ? { ...current, photoCount: current.photoCount + 1 } : current);
       await loadEvent();
     } catch (reason) {
       setError((reason as Error).message);
@@ -369,25 +447,56 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     );
   }
 
-  const activeCamera = cameras.find((item) => item.id === preset) ?? cameras[0];
-  const selectedPhoto = selectedPhotoIndex === null ? null : event.photos[selectedPhotoIndex];
+  if (guestStatus !== "ready" || !guest) {
+    return (
+      <main className="guest-shell camera-app-shell guest-onboarding-shell">
+        <section className="guest-onboarding-card">
+          <span className="guest-onboarding-kicker">Общая камера</span>
+          <h1>{event.title}</h1>
+          {guestStatus === "checking" ? (
+            <div className="guest-onboarding-loading"><LoaderCircle className="spin" /> Возвращаем ваш профиль…</div>
+          ) : (
+            <form onSubmit={submitGuestName}>
+              <span className="guest-avatar"><UserRound size={26} /></span>
+              <h2>Как вас подписать?</h2>
+              <p>Имя появится под вашими фотографиями и в рейтинге гостей.</p>
+              <label>
+                <span>Имя или ник</span>
+                <input
+                  value={guestName}
+                  onChange={(change) => setGuestName(change.target.value)}
+                  maxLength={40}
+                  autoComplete="name"
+                  placeholder="Например, Лера"
+                  autoFocus
+                  required
+                />
+              </label>
+              {guestError && <div className="camera-inline-error">{guestError}</div>}
+              <button className="button button-primary button-large" disabled={guestSaving || !guestName.trim()}>
+                {guestSaving ? <LoaderCircle className="spin" /> : <Camera size={19} />}
+                {guestSaving ? "Входим…" : "Открыть камеру"}
+              </button>
+              <small>Запомним вас на этом устройстве. Пароль не нужен.</small>
+            </form>
+          )}
+        </section>
+      </main>
+    );
+  }
 
+  const selectedPhoto = selectedPhotoIndex === null ? null : event.photos[selectedPhotoIndex];
   return (
     <main className="guest-shell camera-app-shell">
-      <header className="camera-app-header">
-        <BrandMark compact />
-        <button className="camera-album-link" onClick={() => setViewMode((current) => current === "album" ? "camera" : "album")}>
-          {viewMode === "album" ? <Camera size={16} /> : <Images size={16} />}
-          {viewMode === "album" ? "Камера" : "Альбом"} <strong>{event.photoCount}</strong>
-        </button>
-      </header>
-
       <section className="camera-event-strip">
         <div>
           <span>Общая камера</span>
           <h1>{event.title}</h1>
         </div>
-        <p><CalendarDays size={13} /> {formatEventDate(event.date)}{event.location && <><i /> <MapPin size={13} /> {event.location}</>}</p>
+        <aside>
+          <p><CalendarDays size={13} /> {formatEventDate(event.date)}{event.location && <><i /> <MapPin size={13} /> {event.location}</>}</p>
+          <div className="guest-identity"><UserRound size={14} /><strong>{guest.displayName}</strong><small>{guest.photoCount}{guest.photoLimit ? ` / ${guest.photoLimit}` : ""}</small></div>
+        </aside>
       </section>
 
       <nav className="event-view-switcher" aria-label="Режим события">
@@ -396,6 +505,9 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
         </button>
         <button className={viewMode === "album" ? "active" : ""} onClick={() => setViewMode("album")} aria-pressed={viewMode === "album"}>
           <Images size={16} /> Альбом <strong>{event.photoCount}</strong>
+        </button>
+        <button className={viewMode === "leaderboard" ? "active" : ""} onClick={() => setViewMode("leaderboard")} aria-pressed={viewMode === "leaderboard"}>
+          <Trophy size={16} /> Рейтинг
         </button>
       </nav>
 
@@ -416,7 +528,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             </button>
           </div>
 
-          <div className={`live-viewfinder live-preset-${preset} ${colorFlash ? "color-flash-on" : ""}`}>
+          <div className={`live-viewfinder live-preset-flash98 ${colorFlash ? "color-flash-on" : ""}`}>
             <video
               ref={videoRef}
               className={facingMode === "user" ? "mirrored" : ""}
@@ -426,10 +538,11 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             />
             <div className="live-film-grain" />
             <div className="live-vignette" />
+            <div className="live-flash-halo" />
             {gridEnabled && <div className="viewfinder-grid"><i /><i /><i /><i /></div>}
             <div className="viewfinder-readout">
-              <span>FLASHBACK / {activeCamera.label}</span>
-              <span>1×</span>
+              <span>FLASHBACK / {CAMERA_MODEL}</span>
+              <span>REC · 1×</span>
             </div>
             {dateStamp && <span className="live-date">{formatEventDate(event.date)}</span>}
             {shutterFlash && <div className="shutter-flash" />}
@@ -453,10 +566,10 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           </div>
 
           <div className="camera-control-row">
-            <button className="camera-side-control gallery-control" onClick={() => galleryInput.current?.click()} aria-label="Выбрать фотографию из галереи">
+            <button className="camera-side-control gallery-control" onClick={() => galleryInput.current?.click()} disabled={guestAtLimit} aria-label="Выбрать фотографию из галереи">
               {event.photos[0] ? <Image src={event.photos[0].url} alt="Последний кадр" fill unoptimized sizes="48px" /> : <ImagePlus size={21} />}
             </button>
-            <button className="camera-shutter" onClick={() => void takePhoto()} disabled={cameraStatus === "starting" || countdown > 0} aria-label="Снять фото">
+            <button className="camera-shutter" onClick={() => void takePhoto()} disabled={guestAtLimit || cameraStatus === "starting" || countdown > 0} aria-label="Снять фото">
               <span />
             </button>
             <button className="camera-side-control" onClick={() => setFacingMode((value) => value === "environment" ? "user" : "environment")} aria-label="Переключить камеру">
@@ -465,43 +578,23 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           </div>
 
           <div className="camera-deck-label">
-            <span>{activeCamera.label}</span>
-            <small>{activeCamera.description}</small>
-          </div>
-          <div className="camera-carousel" aria-label="Выбор плёночной камеры">
-            {cameras.map((item) => (
-              <button key={item.id} className={preset === item.id ? "active" : ""} onClick={() => void choosePreset(item.id)}>
-                <span>{item.code}</span>
-                <strong>{item.label}</strong>
-                <small>{item.description}</small>
-              </button>
-            ))}
+            <span>{CAMERA_MODEL}</span>
+            <small>{CAMERA_DESCRIPTION}</small>
           </div>
 
           <input ref={fallbackCameraInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={pickPhoto} />
           <input ref={galleryInput} className="visually-hidden" type="file" accept="image/*" onChange={pickPhoto} />
+          {guestAtLimit && <div className="camera-limit-notice"><Trophy size={17} /> Вы сняли все {guest.photoLimit} доступных кадров</div>}
           {error && <div className="camera-inline-error">{error}</div>}
           <p className="camera-privacy">Фото отправится только после подтверждения.</p>
         </section>
       ) : (
         <section className="camera-review">
-          <div className="review-topline"><span>Предпросмотр</span><strong>{activeCamera.label}</strong></div>
+          <div className="review-topline"><span>Предпросмотр</span><strong>{CAMERA_MODEL}</strong></div>
           <div className="photo-preview">
             {previewUrl && <Image src={previewUrl} alt="Предпросмотр фотографии" fill unoptimized sizes="(max-width: 680px) 100vw, 640px" />}
             {processing && <div className="processing-overlay"><LoaderCircle className="spin" /><span>Проявляем плёнку…</span></div>}
-            <div className="film-stamp">FLASHBACK · {activeCamera.label}</div>
-          </div>
-
-          <div className="review-options">
-            <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} disabled={processing}><Zap size={16} /> Цветная вспышка</button>
-            <button className={dateStamp ? "active" : ""} onClick={() => void toggleDateStamp()} disabled={processing}><CalendarDays size={16} /> Дата</button>
-          </div>
-          <div className="camera-carousel review-carousel" aria-label="Выбор обработки">
-            {cameras.map((item) => (
-              <button key={item.id} className={preset === item.id ? "active" : ""} onClick={() => void choosePreset(item.id)} disabled={processing}>
-                <span>{item.code}</span><strong>{item.label}</strong><small>{item.description}</small>
-              </button>
-            ))}
+            <div className="film-stamp">FLASHBACK · {CAMERA_MODEL}</div>
           </div>
 
           {error && <div className="camera-inline-error">{error}</div>}
@@ -513,14 +606,14 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           ) : (
             <div className="editor-actions camera-review-actions">
               <button className="button button-secondary" onClick={resetCapture}><RefreshCw size={18} /> Переснять</button>
-              <button className="button button-primary" onClick={uploadPhoto} disabled={processing || uploading || !processedBlob}>
+              <button className="button button-primary" onClick={uploadPhoto} disabled={guestAtLimit || processing || uploading || !processedBlob}>
                 {uploading ? <LoaderCircle className="spin" /> : <Send size={18} />}
                 {uploading ? "Отправляем…" : "В общий альбом"}
               </button>
             </div>
           )}
         </section>
-      )) : (
+      )) : viewMode === "album" ? (
         <section className="event-album" aria-label="Альбом события">
           <header className="event-album-header">
             <div>
@@ -536,7 +629,8 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
               {event.photos.map((photo, index) => (
                 <button className={`event-album-photo photo-shape-${index % 5}`} key={photo.id} onClick={() => setSelectedPhotoIndex(index)} aria-label={`Открыть фотографию ${index + 1}`}>
                   <Image src={photo.url} alt={`Фото события ${index + 1}`} fill unoptimized sizes="(max-width: 600px) 50vw, 260px" />
-                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <span className="event-album-index">{String(index + 1).padStart(2, "0")}</span>
+                  {photo.authorName && <small className="event-album-author"><UserRound size={12} /> {photo.authorName}</small>}
                 </button>
               ))}
             </div>
@@ -551,6 +645,28 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
 
           <footer className="event-album-count"><Images size={16} /> {event.photoCount} {photoWord(event.photoCount)}</footer>
         </section>
+      ) : (
+        <section className="event-leaderboard" aria-label="Рейтинг гостей">
+          <header>
+            <span>Участники события</span>
+            <h2>Кто поймал больше моментов</h2>
+            <p>В рейтинг попадают только фотографии, уже добавленные в общий альбом.</p>
+          </header>
+          {(event.leaderboard ?? []).length > 0 ? (
+            <ol>
+              {(event.leaderboard ?? []).map((entry, index) => (
+                <li className={entry.guestId === guest.guestId ? "current" : ""} key={entry.guestId}>
+                  <span className="leaderboard-rank">{index + 1}</span>
+                  <span className="leaderboard-avatar"><UserRound size={18} /></span>
+                  <div><strong>{entry.displayName}</strong>{entry.guestId === guest.guestId && <small>Это вы</small>}</div>
+                  <b>{entry.photoCount}<small>{photoWord(entry.photoCount)}</small></b>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="event-leaderboard-empty"><Trophy size={34} /><strong>Рейтинг пока пуст</strong><p>Первый загруженный кадр откроет таблицу.</p></div>
+          )}
+        </section>
       )}
 
       {selectedPhoto && selectedPhotoIndex !== null && (
@@ -564,7 +680,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             <button onClick={() => setSelectedPhotoIndex((selectedPhotoIndex + 1) % event.photos.length)} aria-label="Следующая фотография"><ChevronRight size={27} /></button>
           </div>
           <div className="album-lightbox-meta">
-            <span>{selectedPhotoIndex + 1} / {event.photos.length}</span>
+            <span>{selectedPhoto.authorName ? `Снял(а): ${selectedPhoto.authorName}` : `${selectedPhotoIndex + 1} / ${event.photos.length}`}</span>
             <a href={selectedPhoto.url} target="_blank" rel="noreferrer"><Download size={16} /> Открыть оригинал</a>
           </div>
         </div>

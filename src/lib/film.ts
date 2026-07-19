@@ -1,14 +1,6 @@
-export type FilmPreset = "fb35" | "dispo98" | "ccd04";
-
 export type FilmRenderOptions = {
   dateStamp?: boolean;
   colorFlash?: boolean;
-};
-
-const presetValues: Record<FilmPreset, [number, number, number, number]> = {
-  fb35: [1.08, 0.88, 0.14, 0],
-  dispo98: [1.15, 1.04, 0.2, 1],
-  ccd04: [1.12, 0.92, 0.09, 2],
 };
 
 const vertexShader = `
@@ -25,7 +17,7 @@ precision highp float;
 uniform sampler2D u_image;
 uniform vec2 u_resolution;
 uniform float u_seed;
-uniform vec4 u_style;
+uniform float u_flash;
 varying vec2 v_texCoord;
 
 float random(vec2 p) {
@@ -34,37 +26,36 @@ float random(vec2 p) {
 
 void main() {
   vec2 uv = v_texCoord;
-  vec3 color = texture2D(u_image, uv).rgb;
-  float contrast = u_style.x;
-  float saturation = u_style.y;
-  float grainAmount = u_style.z;
-  float preset = u_style.w;
+  vec2 aberration = (uv - vec2(0.5)) * (0.00115 + u_flash * 0.00065);
+  float red = texture2D(u_image, clamp(uv + aberration, 0.0, 1.0)).r;
+  float blue = texture2D(u_image, clamp(uv - aberration, 0.0, 1.0)).b;
+  vec3 color = vec3(red, texture2D(u_image, uv).g, blue);
 
-  color = (color - 0.5) * contrast + 0.5;
+  color = (color - 0.5) * 1.12 + 0.5;
   float luma = dot(color, vec3(0.299, 0.587, 0.114));
-  color = mix(vec3(luma), color, saturation);
+  color = mix(vec3(luma), color, 0.90);
 
-  if (preset < 0.5) {
-    color *= vec3(1.08, 1.015, 0.9);
-    color += vec3(0.025, 0.008, -0.018);
-  } else if (preset < 1.5) {
-    color *= vec3(1.12, 0.96, 0.82);
-    color += vec3(0.04, 0.005, -0.025);
-  } else {
-    color *= vec3(0.91, 1.02, 1.1);
-    color += vec3(-0.012, 0.006, 0.025);
-  }
+  float shadowMask = 1.0 - smoothstep(0.05, 0.52, luma);
+  color = mix(color, vec3(0.23, 0.34, 0.32), shadowMask * 0.16);
+  float highlightMask = smoothstep(0.28, 0.90, luma);
+  color = mix(color, color * vec3(1.11, 0.985, 0.83) + vec3(0.018, 0.005, -0.012), highlightMask);
+
+  float flashDistance = length((uv - vec2(0.46, 0.39)) * vec2(1.0, 1.22));
+  float flashBloom = smoothstep(0.76, 0.0, flashDistance);
+  color += vec3(0.10, 0.058, 0.018) * flashBloom;
+  color += vec3(0.17, 0.082, 0.024) * flashBloom * u_flash;
 
   float grain = random(uv * u_resolution + u_seed) - 0.5;
-  color += grain * grainAmount;
+  color += grain * (0.115 + u_flash * 0.025);
 
-  float distanceToCenter = distance(uv, vec2(0.5));
+  float distanceToCenter = length((uv - vec2(0.5)) * vec2(0.92, 1.08));
   float vignette = smoothstep(0.82, 0.22, distanceToCenter);
-  color *= mix(0.62, 1.0, vignette);
+  color *= mix(0.54, 1.0, vignette);
 
-  float scratchX = random(vec2(floor(uv.x * 260.0), u_seed));
-  float scratch = step(0.996, scratchX) * smoothstep(0.2, 0.5, random(vec2(uv.y, u_seed)));
-  color += scratch * 0.16;
+  float scratchX = random(vec2(floor(uv.x * 240.0), u_seed));
+  float scratch = step(0.997, scratchX) * smoothstep(0.18, 0.56, random(vec2(uv.y, u_seed)));
+  color += scratch * vec3(0.14, 0.09, 0.045);
+  color = pow(max(color, 0.0), vec3(0.96));
 
   gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }`;
@@ -104,14 +95,29 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
 }
 
 async function finishFrame(canvas: HTMLCanvasElement, options: FilmRenderOptions) {
-  if (!options.dateStamp && !options.colorFlash) return canvasToBlob(canvas);
-
   const output = document.createElement("canvas");
   output.width = canvas.width;
   output.height = canvas.height;
   const context = output.getContext("2d");
   if (!context) return canvasToBlob(canvas);
   context.drawImage(canvas, 0, 0);
+
+  context.save();
+  context.globalCompositeOperation = "screen";
+  const baseBloom = context.createRadialGradient(
+    output.width * 0.46,
+    output.height * 0.39,
+    output.width * 0.03,
+    output.width * 0.46,
+    output.height * 0.39,
+    output.width * 0.72,
+  );
+  baseBloom.addColorStop(0, "rgba(255, 215, 156, .10)");
+  baseBloom.addColorStop(0.48, "rgba(255, 133, 76, .035)");
+  baseBloom.addColorStop(1, "rgba(255, 95, 50, 0)");
+  context.fillStyle = baseBloom;
+  context.fillRect(0, 0, output.width, output.height);
+  context.restore();
 
   if (options.colorFlash) {
     context.save();
@@ -164,14 +170,13 @@ async function canvasFallback(
   canvas.height = height;
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Обработка изображений недоступна.");
-  context.filter = "contrast(1.08) saturate(.88) sepia(.12)";
+  context.filter = "contrast(1.12) saturate(.9) sepia(.18) hue-rotate(-4deg)";
   context.drawImage(image, 0, 0, width, height);
   return finishFrame(canvas, options);
 }
 
 export async function applyFilmEffect(
   file: File,
-  preset: FilmPreset,
   options: FilmRenderOptions = {},
 ) {
   const image = await loadImage(file);
@@ -219,7 +224,7 @@ export async function applyFilmEffect(
 
   gl.uniform2f(gl.getUniformLocation(program, "u_resolution"), width, height);
   gl.uniform1f(gl.getUniformLocation(program, "u_seed"), Math.random() * 1000);
-  gl.uniform4fv(gl.getUniformLocation(program, "u_style"), presetValues[preset]);
+  gl.uniform1f(gl.getUniformLocation(program, "u_flash"), options.colorFlash ? 1 : 0);
   gl.viewport(0, 0, width, height);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 

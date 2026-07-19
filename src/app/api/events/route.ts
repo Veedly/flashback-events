@@ -12,6 +12,7 @@ export async function POST(request: Request) {
     title?: string;
     date?: string;
     location?: string;
+    guestPhotoLimit?: number | null;
   };
 
   if (!body.title?.trim() || !body.date) {
@@ -25,6 +26,9 @@ export async function POST(request: Request) {
     title: body.title,
     date: body.date,
     location: body.location ?? "",
+    guestPhotoLimit: body.guestPhotoLimit === 20 || body.guestPhotoLimit === 50 || body.guestPhotoLimit === 100
+      ? body.guestPhotoLimit
+      : null,
   });
   return Response.json({ event }, { status: 201 });
 }
