@@ -18,6 +18,7 @@ import {
   SwitchCamera,
   Timer,
   Trophy,
+  Upload,
   UserRound,
   X,
   Zap,
@@ -28,6 +29,7 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from
 import {
   applyFilmEffect,
   type FilmRenderOptions,
+  type PhotoLook,
 } from "@/lib/film";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 import type { EventDetails, GuestSession, UploadTicket } from "@/lib/types";
@@ -41,6 +43,27 @@ const GUEST_STORAGE_PREFIX = "flashback-guest:";
 
 const CAMERA_MODEL = "FLASH 98";
 const CAMERA_DESCRIPTION = "одноразовая вспышка · 35 мм";
+
+function LookSwitcher({
+  look,
+  disabled = false,
+  onSelect,
+}: {
+  look: PhotoLook;
+  disabled?: boolean;
+  onSelect: (look: PhotoLook) => void;
+}) {
+  return (
+    <div className="camera-look-switcher" aria-label="Обработка фотографии">
+      <button className={look === "original" ? "active" : ""} onClick={() => onSelect("original")} disabled={disabled} aria-pressed={look === "original"}>
+        Оригинал
+      </button>
+      <button className={look === "flash98" ? "active" : ""} onClick={() => onSelect("flash98")} disabled={disabled} aria-pressed={look === "flash98"}>
+        {CAMERA_MODEL}
+      </button>
+    </div>
+  );
+}
 
 function formatEventDate(value: string) {
   return new Intl.DateTimeFormat("ru-RU", {
@@ -108,6 +131,9 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const [previewUrl, setPreviewUrl] = useState("");
   const [processing, setProcessing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ completed: 0, total: 0 });
+  const [bulkMessage, setBulkMessage] = useState("");
   const [sent, setSent] = useState(false);
   const [error, setError] = useState("");
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>("starting");
@@ -117,6 +143,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const [timerEnabled, setTimerEnabled] = useState(false);
   const [dateStamp, setDateStamp] = useState(true);
   const [colorFlash, setColorFlash] = useState(false);
+  const [photoLook, setPhotoLook] = useState<PhotoLook>("flash98");
   const [countdown, setCountdown] = useState(0);
   const [shutterFlash, setShutterFlash] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("camera");
@@ -130,6 +157,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
   const streamRef = useRef<MediaStream | null>(null);
   const fallbackCameraInput = useRef<HTMLInputElement>(null);
   const galleryInput = useRef<HTMLInputElement>(null);
+  const bulkGalleryInput = useRef<HTMLInputElement>(null);
   const photoTotal = event?.photos.length ?? 0;
   const guestAtLimit = guest?.photoLimit !== null
     && guest?.photoLimit !== undefined
@@ -295,7 +323,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
 
   const processPhoto = useCallback(async (
     file: File,
-    options: FilmRenderOptions = { dateStamp, colorFlash },
+    options: FilmRenderOptions = { dateStamp, colorFlash, look: photoLook },
   ) => {
     setProcessing(true);
     setError("");
@@ -308,7 +336,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     } finally {
       setProcessing(false);
     }
-  }, [colorFlash, dateStamp]);
+  }, [colorFlash, dateStamp, photoLook]);
 
   async function pickPhoto(change: ChangeEvent<HTMLInputElement>) {
     const file = change.target.files?.[0];
@@ -331,7 +359,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     const nextValue = !dateStamp;
     setDateStamp(nextValue);
     if (sourceFile) {
-      await processPhoto(sourceFile, { dateStamp: nextValue, colorFlash });
+      await processPhoto(sourceFile, { dateStamp: nextValue, colorFlash, look: photoLook });
     }
   }
 
@@ -339,7 +367,14 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     const nextValue = !colorFlash;
     setColorFlash(nextValue);
     if (sourceFile) {
-      await processPhoto(sourceFile, { dateStamp, colorFlash: nextValue });
+      await processPhoto(sourceFile, { dateStamp, colorFlash: nextValue, look: photoLook });
+    }
+  }
+
+  async function chooseLook(nextLook: PhotoLook) {
+    setPhotoLook(nextLook);
+    if (sourceFile) {
+      await processPhoto(sourceFile, { dateStamp, colorFlash, look: nextLook });
     }
   }
 
@@ -375,6 +410,43 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     }
   }
 
+  async function uploadPhotoBlob(blob: Blob, session: GuestSession) {
+    const ticketResponse = await fetch(`/api/events/${eventId}/photos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          size: blob.size,
+          contentType: "image/jpeg",
+          guestId: session.guestId,
+          guestToken: session.guestToken,
+        }),
+      });
+    const ticket = (await ticketResponse.json()) as UploadTicket & { error?: string };
+    if (!ticketResponse.ok) {
+      throw new Error(ticket.error ?? "Не удалось подготовить загрузку фото.");
+    }
+
+    const { error: uploadError } = await getSupabaseBrowserClient().storage
+      .from(process.env.NEXT_PUBLIC_SUPABASE_PHOTO_BUCKET ?? "event-photos")
+      .uploadToSignedUrl(ticket.path, ticket.uploadToken, blob, {
+        contentType: "image/jpeg",
+      });
+    if (uploadError) throw uploadError;
+
+    const completeResponse = await fetch(`/api/events/${eventId}/photos/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        photoId: ticket.photoId,
+        completionToken: ticket.completionToken,
+      }),
+    });
+    const complete = (await completeResponse.json()) as { error?: string };
+    if (!completeResponse.ok) {
+      throw new Error(complete.error ?? "Не удалось подтвердить загрузку фото.");
+    }
+  }
+
   async function uploadPhoto() {
     if (!processedBlob || !guest) return;
     if (guestAtLimit) {
@@ -384,40 +456,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
     setUploading(true);
     setError("");
     try {
-      const ticketResponse = await fetch(`/api/events/${eventId}/photos`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          size: processedBlob.size,
-          contentType: "image/jpeg",
-          guestId: guest.guestId,
-          guestToken: guest.guestToken,
-        }),
-      });
-      const ticket = (await ticketResponse.json()) as UploadTicket & { error?: string };
-      if (!ticketResponse.ok) {
-        throw new Error(ticket.error ?? "Не удалось подготовить загрузку фото.");
-      }
-
-      const { error: uploadError } = await getSupabaseBrowserClient().storage
-        .from(process.env.NEXT_PUBLIC_SUPABASE_PHOTO_BUCKET ?? "event-photos")
-        .uploadToSignedUrl(ticket.path, ticket.uploadToken, processedBlob, {
-          contentType: "image/jpeg",
-        });
-      if (uploadError) throw uploadError;
-
-      const completeResponse = await fetch(`/api/events/${eventId}/photos/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          photoId: ticket.photoId,
-          completionToken: ticket.completionToken,
-        }),
-      });
-      const complete = (await completeResponse.json()) as { error?: string };
-      if (!completeResponse.ok) {
-        throw new Error(complete.error ?? "Не удалось подтвердить загрузку фото.");
-      }
+      await uploadPhotoBlob(processedBlob, guest);
       setSent(true);
       setGuest((current) => current ? { ...current, photoCount: current.photoCount + 1 } : current);
       await loadEvent();
@@ -425,6 +464,54 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
       setError((reason as Error).message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function uploadFromMemory(change: ChangeEvent<HTMLInputElement>) {
+    const pickedFiles = Array.from(change.target.files ?? []).filter((file) => file.type.startsWith("image/"));
+    change.target.value = "";
+    if (!guest || pickedFiles.length === 0) return;
+
+    const remaining = guest.photoLimit === null
+      ? pickedFiles.length
+      : Math.max(0, guest.photoLimit - guest.photoCount);
+    const files = pickedFiles.slice(0, remaining);
+    if (files.length === 0) {
+      setError(`Вы уже использовали все ${guest.photoLimit} кадров.`);
+      return;
+    }
+
+    setBulkUploading(true);
+    setBulkProgress({ completed: 0, total: files.length });
+    setBulkMessage("");
+    setError("");
+    let completed = 0;
+
+    try {
+      for (const file of files) {
+        const originalBlob = await applyFilmEffect(file, {
+          look: "original",
+          dateStamp: false,
+          colorFlash: false,
+        });
+        await uploadPhotoBlob(originalBlob, guest);
+        completed += 1;
+        setBulkProgress({ completed, total: files.length });
+      }
+
+      setBulkMessage(`Загружено ${completed} ${photoWord(completed)} без фильтра.`);
+    } catch (reason) {
+      setError(
+        completed > 0
+          ? `Загружено ${completed} из ${files.length}. ${(reason as Error).message}`
+          : (reason as Error).message,
+      );
+    } finally {
+      if (completed > 0) {
+        setGuest((current) => current ? { ...current, photoCount: current.photoCount + completed } : current);
+        await loadEvent();
+      }
+      setBulkUploading(false);
     }
   }
 
@@ -494,7 +581,12 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           <h1>{event.title}</h1>
         </div>
         <aside>
-          <p><CalendarDays size={13} /> {formatEventDate(event.date)}{event.location && <><i /> <MapPin size={13} /> {event.location}</>}</p>
+          <p className="event-meta-line">
+            <span className="event-meta-date"><CalendarDays size={13} /> {formatEventDate(event.date)}</span>
+            {event.location && (
+              <span className="event-meta-location"><i /><MapPin size={13} /><b>{event.location}</b></span>
+            )}
+          </p>
           <div className="guest-identity"><UserRound size={14} /><strong>{guest.displayName}</strong><small>{guest.photoCount}{guest.photoLimit ? ` / ${guest.photoLimit}` : ""}</small></div>
         </aside>
       </section>
@@ -514,7 +606,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
       {viewMode === "camera" ? (!sourceFile ? (
         <section className="dazz-camera" aria-label="Камера события">
           <div className="camera-toolbar" aria-label="Настройки камеры">
-            <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} aria-pressed={colorFlash}>
+            <button className={colorFlash ? "active" : ""} onClick={() => void toggleColorFlash()} aria-pressed={colorFlash} disabled={photoLook === "original"}>
               <Zap size={17} /><span>вспышка</span>
             </button>
             <button className={timerEnabled ? "active" : ""} onClick={() => setTimerEnabled((value) => !value)} aria-pressed={timerEnabled}>
@@ -523,12 +615,12 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             <button className={gridEnabled ? "active" : ""} onClick={() => setGridEnabled((value) => !value)} aria-pressed={gridEnabled}>
               <Grid3X3 size={17} /><span>сетка</span>
             </button>
-            <button className={dateStamp ? "active" : ""} onClick={() => void toggleDateStamp()} aria-pressed={dateStamp}>
+            <button className={dateStamp ? "active" : ""} onClick={() => void toggleDateStamp()} aria-pressed={dateStamp} disabled={photoLook === "original"}>
               <CalendarDays size={17} /><span>дата</span>
             </button>
           </div>
 
-          <div className={`live-viewfinder live-preset-flash98 ${colorFlash ? "color-flash-on" : ""}`}>
+          <div className={`live-viewfinder ${photoLook === "flash98" ? "live-preset-flash98" : "live-preset-original"} ${photoLook === "flash98" && colorFlash ? "color-flash-on" : ""}`}>
             <video
               ref={videoRef}
               className={facingMode === "user" ? "mirrored" : ""}
@@ -536,15 +628,13 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
               muted
               playsInline
             />
-            <div className="live-film-grain" />
-            <div className="live-vignette" />
-            <div className="live-flash-halo" />
+            {photoLook === "flash98" && <><div className="live-film-grain" /><div className="live-vignette" /><div className="live-flash-halo" /></>}
             {gridEnabled && <div className="viewfinder-grid"><i /><i /><i /><i /></div>}
             <div className="viewfinder-readout">
-              <span>FLASHBACK / {CAMERA_MODEL}</span>
+              <span>FLASHBACK / {photoLook === "original" ? "ORIGINAL" : CAMERA_MODEL}</span>
               <span>REC · 1×</span>
             </div>
-            {dateStamp && <span className="live-date">{formatEventDate(event.date)}</span>}
+            {photoLook === "flash98" && dateStamp && <span className="live-date">{formatEventDate(event.date)}</span>}
             {shutterFlash && <div className="shutter-flash" />}
             {countdown > 0 && <div className="camera-countdown">{countdown}</div>}
 
@@ -566,10 +656,10 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           </div>
 
           <div className="camera-control-row">
-            <button className="camera-side-control gallery-control" onClick={() => galleryInput.current?.click()} disabled={guestAtLimit} aria-label="Выбрать фотографию из галереи">
+            <button className="camera-side-control gallery-control" onClick={() => galleryInput.current?.click()} disabled={guestAtLimit || bulkUploading} aria-label="Выбрать фотографию из галереи">
               {event.photos[0] ? <Image src={event.photos[0].url} alt="Последний кадр" fill unoptimized sizes="48px" /> : <ImagePlus size={21} />}
             </button>
-            <button className="camera-shutter" onClick={() => void takePhoto()} disabled={guestAtLimit || cameraStatus === "starting" || countdown > 0} aria-label="Снять фото">
+            <button className="camera-shutter" onClick={() => void takePhoto()} disabled={guestAtLimit || bulkUploading || cameraStatus === "starting" || countdown > 0} aria-label="Снять фото">
               <span />
             </button>
             <button className="camera-side-control" onClick={() => setFacingMode((value) => value === "environment" ? "user" : "environment")} aria-label="Переключить камеру">
@@ -577,25 +667,37 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
             </button>
           </div>
 
-          <div className="camera-deck-label">
-            <span>{CAMERA_MODEL}</span>
-            <small>{CAMERA_DESCRIPTION}</small>
+          <div className="camera-look-panel">
+            <div><span>{photoLook === "original" ? "Без обработки" : CAMERA_DESCRIPTION}</span><small>Выберите вид снимка</small></div>
+            <LookSwitcher look={photoLook} disabled={bulkUploading} onSelect={(look) => void chooseLook(look)} />
           </div>
+
+          <button className="camera-bulk-upload" onClick={() => bulkGalleryInput.current?.click()} disabled={guestAtLimit || bulkUploading}>
+            {bulkUploading ? <LoaderCircle className="spin" /> : <Upload size={19} />}
+            <span>
+              <strong>{bulkUploading ? `Загружаем ${bulkProgress.completed} / ${bulkProgress.total}` : "Загрузить из памяти"}</strong>
+              <small>Можно выбрать несколько фото · без фильтра</small>
+            </span>
+          </button>
 
           <input ref={fallbackCameraInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={pickPhoto} />
           <input ref={galleryInput} className="visually-hidden" type="file" accept="image/*" onChange={pickPhoto} />
+          <input ref={bulkGalleryInput} className="visually-hidden" type="file" accept="image/*" multiple onChange={uploadFromMemory} />
           {guestAtLimit && <div className="camera-limit-notice"><Trophy size={17} /> Вы сняли все {guest.photoLimit} доступных кадров</div>}
+          {bulkMessage && <div className="camera-bulk-success"><Check size={16} /> {bulkMessage}</div>}
           {error && <div className="camera-inline-error">{error}</div>}
           <p className="camera-privacy">Фото отправится только после подтверждения.</p>
         </section>
       ) : (
         <section className="camera-review">
-          <div className="review-topline"><span>Предпросмотр</span><strong>{CAMERA_MODEL}</strong></div>
+          <div className="review-topline"><span>Предпросмотр</span><strong>{photoLook === "original" ? "ORIGINAL" : CAMERA_MODEL}</strong></div>
           <div className="photo-preview">
             {previewUrl && <Image src={previewUrl} alt="Предпросмотр фотографии" fill unoptimized sizes="(max-width: 680px) 100vw, 640px" />}
             {processing && <div className="processing-overlay"><LoaderCircle className="spin" /><span>Проявляем плёнку…</span></div>}
-            <div className="film-stamp">FLASHBACK · {CAMERA_MODEL}</div>
+            <div className="film-stamp">FLASHBACK · {photoLook === "original" ? "ORIGINAL" : CAMERA_MODEL}</div>
           </div>
+
+          <LookSwitcher look={photoLook} disabled={processing} onSelect={(look) => void chooseLook(look)} />
 
           {error && <div className="camera-inline-error">{error}</div>}
           {sent ? (
@@ -608,7 +710,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
               <button className="button button-secondary" onClick={resetCapture}><RefreshCw size={18} /> Переснять</button>
               <button className="button button-primary" onClick={uploadPhoto} disabled={guestAtLimit || processing || uploading || !processedBlob}>
                 {uploading ? <LoaderCircle className="spin" /> : <Send size={18} />}
-                {uploading ? "Отправляем…" : "В общий альбом"}
+                {uploading ? "Сохраняем…" : "Сохранить"}
               </button>
             </div>
           )}
@@ -627,10 +729,12 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           {event.photos.length > 0 ? (
             <div className="event-album-grid">
               {event.photos.map((photo, index) => (
-                <button className={`event-album-photo photo-shape-${index % 5}`} key={photo.id} onClick={() => setSelectedPhotoIndex(index)} aria-label={`Открыть фотографию ${index + 1}`}>
-                  <Image src={photo.url} alt={`Фото события ${index + 1}`} fill unoptimized sizes="(max-width: 600px) 50vw, 260px" />
-                  <span className="event-album-index">{String(index + 1).padStart(2, "0")}</span>
-                  {photo.authorName && <small className="event-album-author"><UserRound size={12} /> {photo.authorName}</small>}
+                <button className={`event-album-photo polaroid-tilt-${index % 5}`} key={photo.id} onClick={() => setSelectedPhotoIndex(index)} aria-label={`Открыть фотографию ${index + 1}`}>
+                  <span className="polaroid-image"><Image src={photo.url} alt={`Фото события ${index + 1}`} fill unoptimized loading={index < 4 ? "eager" : "lazy"} sizes="(max-width: 600px) 50vw, 260px" /></span>
+                  <span className="polaroid-caption">
+                    <small className="event-album-author">{photo.authorName ?? "Flashback"}</small>
+                    <span className="event-album-index">{String(index + 1).padStart(2, "0")}</span>
+                  </span>
                 </button>
               ))}
             </div>
@@ -675,7 +779,7 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
           <div className="album-lightbox-stage">
             <button onClick={() => setSelectedPhotoIndex((selectedPhotoIndex - 1 + event.photos.length) % event.photos.length)} aria-label="Предыдущая фотография"><ChevronLeft size={27} /></button>
             <div className="album-lightbox-photo">
-              <Image src={selectedPhoto.url} alt={`Фото события ${selectedPhotoIndex + 1}`} fill unoptimized sizes="100vw" priority />
+              <Image src={selectedPhoto.url} alt={`Фото события ${selectedPhotoIndex + 1}`} fill unoptimized sizes="100vw" loading="eager" />
             </div>
             <button onClick={() => setSelectedPhotoIndex((selectedPhotoIndex + 1) % event.photos.length)} aria-label="Следующая фотография"><ChevronRight size={27} /></button>
           </div>
@@ -686,7 +790,6 @@ export function EventCamera({ eventId, initialEvent }: { eventId: string; initia
         </div>
       )}
 
-      <footer className="guest-footer camera-footer">Снимайте живое. Остальное сделает плёнка.</footer>
     </main>
   );
 }

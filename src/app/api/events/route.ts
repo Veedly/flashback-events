@@ -1,13 +1,20 @@
 import { createEvent, listEvents } from "@/lib/server-store";
+import { isOrganizerAuthenticated } from "@/lib/organizer-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  if (!(await isOrganizerAuthenticated())) {
+    return Response.json({ error: "Требуется вход организатора." }, { status: 401 });
+  }
   return Response.json({ events: await listEvents() });
 }
 
 export async function POST(request: Request) {
+  if (!(await isOrganizerAuthenticated())) {
+    return Response.json({ error: "Требуется вход организатора." }, { status: 401 });
+  }
   const body = (await request.json()) as {
     title?: string;
     date?: string;

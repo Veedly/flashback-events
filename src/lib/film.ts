@@ -1,6 +1,9 @@
+export type PhotoLook = "original" | "flash98";
+
 export type FilmRenderOptions = {
   dateStamp?: boolean;
   colorFlash?: boolean;
+  look?: PhotoLook;
 };
 
 const vertexShader = `
@@ -94,6 +97,20 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
   });
 }
 
+function renderOriginal(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Обработка изображений недоступна.");
+  context.drawImage(image, 0, 0, width, height);
+  return canvasToBlob(canvas);
+}
+
 async function finishFrame(canvas: HTMLCanvasElement, options: FilmRenderOptions) {
   const output = document.createElement("canvas");
   output.width = canvas.width;
@@ -184,6 +201,9 @@ export async function applyFilmEffect(
   const scale = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight));
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  if (options.look === "original") {
+    return renderOriginal(image, width, height);
+  }
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;

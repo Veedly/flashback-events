@@ -8,6 +8,7 @@ import {
   Copy,
   Image as ImageIcon,
   LoaderCircle,
+  LogOut,
   MapPin,
   Plus,
   QrCode,
@@ -83,11 +84,18 @@ export function OrganizerDashboard({ initialEvents }: { initialEvents: EventReco
     window.setTimeout(() => setCopied(false), 1800);
   }
 
+  async function signOut() {
+    await fetch("/api/auth/organizer", { method: "DELETE" });
+    window.location.replace("/login");
+  }
+
   return (
     <main className="organizer-shell">
       <header className="topbar">
         <BrandMark />
-        <span className="mode-pill">Для организатора</span>
+        <button className="mode-pill organizer-logout" onClick={signOut}>
+          <LogOut size={13} /> Выйти
+        </button>
       </header>
 
       <section className="hero-section">
